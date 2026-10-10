@@ -1,0 +1,69 @@
+// All feel parameters. Hot-reloaded by the game: save this file and changes apply live.
+// Units: meters, seconds, m/s, m/s². Angles in degrees.
+(
+    tick_rate: 60,
+    preview_horizon: 6.0,   // seconds of own-car preview while paused
+    vehicle: (
+        length: 4.5,
+        width: 1.9,
+        wheelbase: 2.7,
+        max_steer_deg: 35.0,
+        steer_rate_deg: 120.0,
+
+        engine_accel: 8.0,
+        top_speed: 42.0,
+        reverse_accel: 3.0,
+        reverse_top_speed: 8.0,
+        brake_decel: 10.0,
+        rolling_resistance: 0.3,
+        drag: 0.0004,
+
+        // Friction circle radius = grip * gravity.
+        gravity: 9.81,
+        grip: 1.5,
+        slide_grip: 0.75,
+
+        // Grip demand zones: green < comfort_demand < yellow < 1.0 < red.
+        // Red up to slide_threshold = understeer (runs wide); beyond it = slide.
+        // Below slide_ref_speed (m/s) the threshold grows, so slow cars only understeer.
+        comfort_demand: 0.7,
+        slide_threshold: 1.2,
+        understeer_scrub: 0.3,   // g of drag per unit of demand over 1.0 (plowing)
+        slide_ref_speed: 15.0,
+
+        // Slide behavior.
+        slide_steer_authority: 0.35,
+        slide_yaw_tau: 0.5,
+        slide_exit_lat_speed: 1.0,
+        slide_exit_demand: 0.85,
+        slide_exit_yaw_error_deg: 15.0,
+
+        handbrake_decel: 3.0,
+        handbrake_grip: 0.6,
+        handbrake_yaw_gain: 1.8,
+        handbrake_min_speed: 3.0,
+    ),
+    // Path follower (pure pursuit) and speed controller.
+    control: (
+        lookahead_base: 3.0,        // m
+        lookahead_per_speed: 0.3,   // extra m of lookahead per m/s
+        speed_gain: 2.0,            // m/s² per m/s of speed error
+        plan_accel: 4.0,            // speed profiles accelerate at this rate...
+        plan_decel: 6.0,            // ...and brake at this rate
+    ),
+    // Drag tool path fitting and defaults.
+    planner: (
+        handle_base: 0.33,          // Bézier handle = chord * (base + turn * |Δheading|/180°)
+        handle_turn: 0.25,
+        path_spacing: 0.25,         // m between path samples
+        default_cruise: 12.0,       // m/s for new segments starting from rest
+    ),
+    // Debug keyboard driving (M key toggles manual mode).
+    // Full key input asks for a lateral grip demand, not a wheel angle.
+    keyboard: (
+        steer_ramp_per_s: 2.0,
+        steer_return_per_s: 5.0,
+        full_steer_demand: 0.9,  // A/D: hard cornering, stays in yellow
+        push_steer_demand: 3.0,  // Ctrl+A/D: beyond the limit
+    ),
+)

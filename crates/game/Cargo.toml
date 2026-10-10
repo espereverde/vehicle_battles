@@ -1,0 +1,14 @@
+[package]
+name = "game"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+sim = { path = "../sim" }
+ron.workspace = true
+bevy = { version = "0.19.1", default-features = false, features = ["2d"] }
+bevy_egui = "0.42"
+
+[features]
+# Faster incremental builds while iterating: `cargo run -p game --features dyn`
+dyn = ["bevy/dynamic_linking"]
