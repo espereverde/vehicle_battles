@@ -5,23 +5,25 @@
 //! identical result (same machine). Never read clocks, global RNGs or iterate hash maps here.
 
 pub mod control;
+pub mod fit;
 pub mod orders;
-pub mod path;
 pub mod preview;
 pub mod replay;
 pub mod rng;
 pub mod state;
+pub mod track;
 pub mod tuning;
 pub mod vehicle;
 
 pub use glam::Vec2;
-pub use orders::{Hold, Maneuver, OrderQueue, Segment, SpeedProfile};
-pub use path::PathSpec;
+pub use fit::{Fit, fit_segment};
+pub use orders::{Drive, OrderQueue, Segment, Turn, TurnMode, hold_throttle};
 pub use preview::{CarFrame, Preview};
 pub use replay::{Command, Replay};
 pub use rng::SimRng;
 pub use state::{Car, CarId, Controls, DriveMode, Pilot, Pose, SimState, SlideState};
-pub use tuning::{ControlTuning, KeyboardTuning, PlannerTuning, Tuning, VehicleTuning};
+pub use track::{Piece, Track, TrackPos, TrackSpec};
+pub use tuning::{KeyboardTuning, PlannerTuning, Tuning, VehicleTuning};
 
 /// Immutable map data shared by live and preview simulation. Roads and the SDF grid arrive
 /// in M3; for now the world is an empty, infinite plane.
@@ -33,6 +35,11 @@ pub struct World {}
 pub enum StepMode {
     Live,
     Preview,
+    /// Like `Preview`, but the tires never give up: no understeer, no slides, the car goes
+    /// where its controls point it (no tighter than the steering lock). Grip demand is still
+    /// computed, so the path can be colored by what the real car would face. The player's
+    /// planning preview and the drag fit use it; only live play shows what really happens.
+    Ideal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -50,15 +57,16 @@ pub struct StepEvents {
 }
 
 /// Advances the simulation by exactly one fixed tick (`tuning.dt()`).
-pub fn step(state: &mut SimState, _world: &World, tuning: &Tuning, _mode: StepMode) -> StepEvents {
+pub fn step(state: &mut SimState, _world: &World, tuning: &Tuning, mode: StepMode) -> StepEvents {
     let dt = tuning.dt();
+    let ideal = mode == StepMode::Ideal;
     let mut out = StepEvents::default();
     for car in &mut state.cars {
-        for _ in 0..control::drive(car, &tuning.vehicle, &tuning.control) {
+        for _ in 0..control::drive(car, &tuning.vehicle) {
             let remaining = car.orders.segments.len();
             out.events.push(SimEvent::SegmentCompleted { car: car.id, tick: state.tick, remaining });
         }
-        if let Some(change) = vehicle::step_car(car, &tuning.vehicle, dt) {
+        if let Some(change) = vehicle::step_car(car, &tuning.vehicle, dt, ideal) {
             out.events.push(match change {
                 vehicle::SlideChange::Started { speed } => {
                     SimEvent::SlideStarted { car: car.id, tick: state.tick, speed }

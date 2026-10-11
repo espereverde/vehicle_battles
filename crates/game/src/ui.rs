@@ -11,6 +11,11 @@ use crate::{AppState, EventLog, Sim, TuningRes};
 
 pub struct UiPlugin;
 
+/// m/s (or m/s²) → km/h (or km/h per second). The sim works in SI units; the UI shows km/h.
+pub fn kmh(v: f32) -> f32 {
+    v * 3.6
+}
+
 impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_systems(EguiPrimaryContextPass, inspector);
@@ -65,12 +70,16 @@ fn inspector(
                 ui.end_row();
             };
             let speed = car.vel.length();
-            row("speed", format!("{speed:6.2} m/s  {:5.1} km/h", speed * 3.6));
-            row("v long / lat", format!("{:6.2} / {:6.2} m/s", car.forward_speed(), car.lateral_speed()));
+            row("speed", format!("{:6.1} km/h", kmh(speed)));
+            row("v long / lat", format!("{:6.1} / {:6.1} km/h", kmh(car.forward_speed()), kmh(car.lateral_speed())));
             row("slip angle", format!("{:6.1}°", car.slip_angle().to_degrees()));
             row("yaw rate", format!("{:6.1}°/s", car.yaw_rate.to_degrees()));
             row("steer angle", format!("{:6.1}°", car.steer_angle.to_degrees()));
-            row("accel", format!("{:6.2} m/s² ({:.2} g)", car.accel.length(), car.accel.length() / tuning.vehicle.gravity));
+            let a = car.accel;
+            let along = a.dot(car.pose.forward());
+            let side = a.dot(car.pose.left());
+            row("accel long / lat", format!("{:+6.1} / {:+6.1} km/h/s", kmh(along), kmh(side)));
+            row("accel total", format!("{:6.1} km/h/s ({:.2} g)", kmh(a.length()), a.length() / tuning.vehicle.gravity));
             row("heading", format!("{:6.1}°", car.pose.heading.to_degrees()));
             row("position", format!("{:7.1}, {:7.1}", car.pose.pos.x, car.pose.pos.y));
             row(
@@ -87,10 +96,10 @@ fn inspector(
                 format!("steer {:+.2} thr {:+.2} brk {:.1}{}", c.steer, c.throttle, c.brake, if c.handbrake { " HB" } else { "" }),
             );
             let orders = match car.orders.segments.first() {
-                Some(seg) => format!("{} seg, {:.0}/{:.0} m", car.orders.segments.len(), seg.progress, seg.length()),
-                None => car.orders.hold.map_or("hold (current)".into(), |h| format!("hold {:.0} m/s", h.speed)),
+                Some(seg) => format!("{} kp, {}/{} ticks", car.orders.segments.len(), seg.elapsed, seg.ticks),
+                None => "continue".into(),
             };
-            row("orders", orders);
+            row("orders", format!("{orders}  {}", crate::planning::describe(&car.orders.active_drive())));
         });
         ui.add(
             egui::ProgressBar::new((car.grip_demand / 1.5).min(1.0))
@@ -102,21 +111,23 @@ fn inspector(
         egui::CollapsingHeader::new("Events").default_open(false).show(ui, |ui| {
             for e in log.0.iter().rev() {
                 ui.monospace(match e {
-                    SimEvent::SlideStarted { tick, speed, .. } => format!("{tick:>6}  slide start @ {speed:.1} m/s"),
+                    SimEvent::SlideStarted { tick, speed, .. } => format!("{tick:>6}  slide start @ {:.0} km/h", kmh(*speed)),
                     SimEvent::SlideEnded { tick, duration, .. } => format!("{tick:>6}  slide end after {duration:.2} s"),
                     SimEvent::SegmentCompleted { tick, remaining, .. } => format!("{tick:>6}  segment done, {remaining} left"),
                 });
             }
         });
-        egui::CollapsingHeader::new("Controls").default_open(true).show(ui, |ui| {
+        egui::CollapsingHeader::new("Controls").default_open(false).show(ui, |ui| {
             ui.label("Space       run / pause (commits the plan)");
-            ui.label("LMB ground  add segment (drag to place)");
-            ui.label("LMB ghost   move end · knob: end heading");
-            ui.label("Wheel ghost end speed (Shift: cruise)");
+            ui.label("LMB ground  add keypoint (drag to place)");
+            ui.label("LMB ghost   drag: further = later, sideways = turn");
+            ui.label("Wheel       throttle ±5% (dragged/hovered/selected)");
+            ui.label("T turn mode · S straight at current speed");
             ui.label("RMB ghost / Del  delete · Esc revert");
             ui.label(".           single tick");
-            ui.label("Wheel / MMB zoom / pan · F follow car");
-            ui.label("R restart · N new course · M manual drive");
+            ui.label("Ctrl+Wheel / MMB zoom / pan · F follow car");
+            ui.label("C track / parking · R restart · N new course");
+            ui.label("M manual drive");
             ui.label("F5 save replay · F9 verify replay");
         });
     });

@@ -1,0 +1,21 @@
+// Test track: straights and circular arcs, starting at the origin heading east (+x).
+// The loop is closed with a straight from the end of the last piece back to the start;
+// the game reports the gap if the pieces don't end on the start line heading east.
+// Units: meters, degrees. Corner speeds assume grip 1.5 g.
+(
+    name: "Test track",
+    width: 10.0,
+    pieces: [
+        Straight(140.0),
+        Left(deg: 90.0, radius: 45.0),     // T1: fast sweeper, ~93 km/h
+        Straight(80.0),
+        Left(deg: 135.0, radius: 16.0),    // T2: hairpin, ~55 km/h
+        Straight(41.92),
+        Right(deg: 45.0, radius: 40.0),    // T3: kink, ~87 km/h
+        Straight(154.8),
+        Left(deg: 90.0, radius: 25.0),     // T4: ~69 km/h
+        Straight(40.0),
+        Left(deg: 90.0, radius: 30.0),     // T5: ~76 km/h, onto the start straight
+        // closing straight back to the start line (50 m) is added automatically
+    ],
+)

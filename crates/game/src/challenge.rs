@@ -9,6 +9,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use sim::{CarId, Pose, SimRng, SimState};
 
 use crate::render::{WorldView, car_outline};
+use crate::track::Mode;
 use crate::{AppState, Sim, TuningRes};
 
 pub struct ChallengePlugin;
@@ -16,9 +17,9 @@ pub struct ChallengePlugin;
 impl Plugin for ChallengePlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(Challenge::new(1))
-            .add_systems(OnEnter(AppState::Paused), count_pause)
-            .add_systems(Update, draw_targets)
-            .add_systems(EguiPrimaryContextPass, (challenge_panel, target_labels));
+            .add_systems(OnEnter(AppState::Paused), count_pause.run_if(resource_equals(Mode::Parking)))
+            .add_systems(Update, draw_targets.run_if(resource_equals(Mode::Parking)))
+            .add_systems(EguiPrimaryContextPass, (challenge_panel, target_labels).run_if(resource_equals(Mode::Parking)));
     }
 }
 
@@ -50,7 +51,7 @@ impl Target {
     }
 
     pub fn label(&self) -> String {
-        if self.max_speed <= STOP_SPEED { "STOP".into() } else { format!("≤ {:.0} m/s", self.max_speed) }
+        if self.max_speed <= STOP_SPEED { "STOP".into() } else { format!("≤ {:.0} km/h", crate::ui::kmh(self.max_speed)) }
     }
 }
 
@@ -173,7 +174,7 @@ fn challenge_panel(mut contexts: EguiContexts, challenge: Res<Challenge>, sim: R
         if let Some(best) = challenge.best {
             ui.label(format!("best: {:.1} s", best as f32 / rate));
         }
-        ui.small("R restart · N new course");
+        ui.small("R restart · N new course · C test track");
     });
     Ok(())
 }

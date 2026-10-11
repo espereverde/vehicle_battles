@@ -10,6 +10,9 @@
 //! `slide_threshold`, which rises at low speed) or with the handbrake, it enters a slide:
 //! grip drops to `slide_grip`, steering keeps only part of its authority and the yaw rate
 //! carries momentum (drift), so velocity and heading separate until grip is regained.
+//!
+//! With `ideal` (see `StepMode::Ideal`) the tires have unlimited grip: the intended motion
+//! always happens, and an ongoing slide is dropped as if grip came back at once.
 
 use crate::state::{Car, Controls, SlideState};
 use crate::tuning::VehicleTuning;
@@ -20,7 +23,7 @@ pub enum SlideChange {
     Ended { duration: f32 },
 }
 
-pub fn step_car(car: &mut Car, vt: &VehicleTuning, dt: f32) -> Option<SlideChange> {
+pub fn step_car(car: &mut Car, vt: &VehicleTuning, dt: f32, ideal: bool) -> Option<SlideChange> {
     let c = car.controls;
     let v_long = car.forward_speed();
 
@@ -42,17 +45,19 @@ pub fn step_car(car: &mut Car, vt: &VehicleTuning, dt: f32) -> Option<SlideChang
     // breaks into a slide when overdriven beyond `slide_threshold`. At low speed there is
     // little momentum to break traction, so the threshold rises as speed drops.
     let speed = car.vel.length();
-    let threshold = vt.slide_threshold * (vt.slide_ref_speed / speed.max(0.1)).max(1.0);
+    let threshold = slide_threshold(speed, vt);
     let handbrake = c.handbrake && speed > vt.handbrake_min_speed;
     let mut change = None;
-    if car.slide.is_none() && (demand > threshold || handbrake) {
+    if ideal {
+        car.slide = None;
+    } else if car.slide.is_none() && (demand > threshold || handbrake) {
         car.slide = Some(SlideState::default());
         change = Some(SlideChange::Started { speed });
     }
 
     // With grip, an over-demanding command is scaled back onto the friction circle, and
     // the tires scrubbing past their limit slow the car (plowing), never reversing it.
-    let on_circle = demand.max(1.0);
+    let on_circle = if ideal { 1.0 } else { demand.max(1.0) };
     let (a_long, yaw_grip) = match car.slide {
         None => {
             let scrub = vt.understeer_scrub * (on_circle - 1.0).min(1.0) * vt.gravity;
@@ -82,7 +87,7 @@ pub fn step_car(car: &mut Car, vt: &VehicleTuning, dt: f32) -> Option<SlideChang
         Some(_) if handbrake => vt.slide_grip * vt.handbrake_grip,
         Some(_) => vt.slide_grip,
     };
-    let dv = (v_target - car.vel).clamp_length_max(mu * vt.gravity * dt);
+    let dv = if ideal { v_target - car.vel } else { (v_target - car.vel).clamp_length_max(mu * vt.gravity * dt) };
     car.vel += dv;
     car.accel = dv / dt;
     car.pose.pos += car.vel * dt;
@@ -102,6 +107,11 @@ pub fn step_car(car: &mut Car, vt: &VehicleTuning, dt: f32) -> Option<SlideChang
         }
     }
     change
+}
+
+/// Grip demand above which a gripping car at `speed` breaks into a slide.
+pub fn slide_threshold(speed: f32, vt: &VehicleTuning) -> f32 {
+    vt.slide_threshold * (vt.slide_ref_speed / speed.max(0.1)).max(1.0)
 }
 
 /// Acceleration along the heading from engine, brakes and resistance. Resistive forces

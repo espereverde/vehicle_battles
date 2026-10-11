@@ -68,3 +68,75 @@ Playtest: "Parking challenge" (needs a human)
 - [ ] Is dragging precise enough? Do players want waypoints mid-segment?
 - [ ] Is the speed model (scroll end speed, Shift+scroll cruise) understandable?
 - [x] Preview-vs-reality check passes (tests + in-game).
+
+### M1 rework — keypoints with constant controls (after playtest 1)
+
+Feedback: the path + cruise/end speed model was not intuitive. Replaced with:
+- Segments between keypoints hold constant controls: a turn (constant steering, or constant
+  lateral g with steering adapting to speed; T / buttons) and a constant throttle (wheel,
+  ±5%, negative = brake), for a set number of ticks. Keypoint positions are simulated,
+  never stored, so editing one keypoint moves the later ones and keeps their controls.
+- Dragging a keypoint fits its turn and duration to the cursor by simulating candidates
+  (`sim::fit_segment`: 61 coarse samples, cubic in steering so they are dense near zero,
+  golden-section refinement of each local minimum, ~3.5 ms in dev builds). It minimizes
+  `miss² + fit_g_weight · ∫ grip demand² dt` (integral, so a stopped car gains nothing by
+  waiting and the keypoint lands where it stops), and never plans a slide when a slide-free
+  turn exists: with the cursor out of reach while braking it used to lock the car into a
+  slide to travel further (sliding brakes less than gripping). Earlier issue: past the grip limit the car slides and every
+  hard turn lands near the gentle one (steering jumped 9% → 100%); the g term makes the gentle
+  one win, and as a smooth score it doesn't flip between solutions like a distance cutoff.
+  Sweep over cursor grids: no keypoint jumps > 1.5 m between cursor positions 0.5 m apart,
+  except starting mid-slide with the cursor 12+ m outside the reachable area.
+  Further away = later in time, sideways = more turn. The scrub follows the dragged keypoint.
+- After the last keypoint the car keeps its last throttle and turn ("continue").
+- "Straight" sets throttle to the value that holds the start speed (`hold_throttle`).
+- Preview horizon 5 s. Keypoints pushed past it by earlier edits are kept, but are not
+  editable until they come into view.
+- Removed: Bézier paths, pure pursuit, speed profiles (`path.rs`, `ControlTuning`).
+- In-game check: committed 2-keypoint plan, "300/300 ticks identical".
+
+Playtest (needs a human):
+- [ ] Is dragging a keypoint (further = later, sideways = turn) intuitive?
+- [ ] Steering vs g-force: which mode do players use, and when?
+- [ ] Is constant throttle per segment enough, or is a speed target wanted back?
+
+### Test track
+
+- `assets/maps/track.ron`: 733 m loop, 10 m wide, built from straights and arcs (exact radii):
+  T1 L90° r45 (~93 km/h at 1.5 g), T2 L135° r16 hairpin (~55), T3 R45° r40 kink (~87),
+  T4 L90° r25 (~69), T5 L90° r30 (~76); 140 m start straight. The loop is closed with an
+  automatic straight back to the start.
+- `sim::track`: centerline sampled every 0.5 m, `project` → (s, d), `frame_at(s)`. This is the
+  Frenet groundwork for M3; tracks are not yet part of `sim::World` (no physics effect).
+- Game: road mesh + edges + dashed centerline + checkered start line, lap timer (lap counts
+  after passing halfway), off-track counter, preview marks where the plan leaves the road.
+  Mode switch C (track / parking), track is the default.
+
+### M1 rework 2 — drag ignores sliding (after playtest 2)
+
+Feedback: the preview jumped around while dragging, so the result of a slide was hard to predict.
+Simplified:
+- New `StepMode::Ideal`: the same `step()` with unlimited tire grip (no understeer scaling or
+  scrub, no friction-circle clamp, no slide; an ongoing slide is dropped). Grip demand is still
+  computed. Within the grip limit it is bitwise identical to the real model (tested).
+- `fit_segment` always runs in `Ideal` and now just minimizes the distance to the cursor (earliest
+  tick on ties). Removed: the grip-force term (`fit_g_weight`) and the "never plan a slide"
+  preference. Both existed only to resolve the many-to-one mapping that sliding caused.
+  Hard turns now land exactly on the cursor.
+- The planning preview always runs in `Ideal` (first only while dragging; after playtest it
+  stays on after release too). The player sees the intended outcome; things can still get out of
+  hand live. Turning stays limited by the steering lock and steering rate (tested). The path keeps
+  its grip coloring: orange past 1.0 (would understeer), red past the speed-dependent slide
+  threshold (would slide); the timeline says "would SLIDE (not simulated)". While running, a faint
+  ideal path is re-previewed from the live state every tick, so it starts at the car.
+- This is a deliberate exception to "preview is the simulation" (§2). The reality check still
+  compares live play with a real-model preview, so it remains a determinism check, but the
+  player-facing preview no longer matches live play once grip is exceeded.
+- Keypoints are anchored to instants in time (bug: slowing an earlier segment pushed the last
+  keypoint past the horizon, where it vanished). Refitting a keypoint only lets it move between
+  the previous and the next keypoint's times; the next segment absorbs the change. Deleting one
+  lengthens the next segment. Positions of later keypoints still follow from the simulation.
+  This lives in the game's draft editing; `sim::Segment` still stores durations.
+
+Playtest (needs a human):
+- [ ] Is the drag stable now? Do red/orange warnings make slides feel fair when they happen live?

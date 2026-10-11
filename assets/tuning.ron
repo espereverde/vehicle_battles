@@ -2,7 +2,7 @@
 // Units: meters, seconds, m/s, m/s². Angles in degrees.
 (
     tick_rate: 60,
-    preview_horizon: 6.0,   // seconds of own-car preview while paused
+    preview_horizon: 5.0,   // seconds of own-car preview while paused
     vehicle: (
         length: 4.5,
         width: 1.9,
@@ -43,20 +43,12 @@
         handbrake_yaw_gain: 1.8,
         handbrake_min_speed: 3.0,
     ),
-    // Path follower (pure pursuit) and speed controller.
-    control: (
-        lookahead_base: 3.0,        // m
-        lookahead_per_speed: 0.3,   // extra m of lookahead per m/s
-        speed_gain: 2.0,            // m/s² per m/s of speed error
-        plan_accel: 4.0,            // speed profiles accelerate at this rate...
-        plan_decel: 6.0,            // ...and brake at this rate
-    ),
-    // Drag tool path fitting and defaults.
+    // Planning tool.
     planner: (
-        handle_base: 0.33,          // Bézier handle = chord * (base + turn * |Δheading|/180°)
-        handle_turn: 0.25,
-        path_spacing: 0.25,         // m between path samples
-        default_cruise: 12.0,       // m/s for new segments starting from rest
+        default_throttle: 0.4,      // new keypoint throttle when the car would sit still
+        throttle_step: 0.05,        // per mouse-wheel notch
+        max_lateral_g: 2.0,         // drag search range in g-force mode
+        straight_seconds: 1.0,      // length of a keypoint added with "Straight"
     ),
     // Debug keyboard driving (M key toggles manual mode).
     // Full key input asks for a lateral grip demand, not a wheel angle.

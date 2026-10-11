@@ -9,7 +9,6 @@ pub struct Tuning {
     /// Seconds simulated ahead for the player's own preview.
     pub preview_horizon: f32,
     pub vehicle: VehicleTuning,
-    pub control: ControlTuning,
     pub planner: PlannerTuning,
     pub keyboard: KeyboardTuning,
 }
@@ -28,9 +27,8 @@ impl Default for Tuning {
     fn default() -> Self {
         Self {
             tick_rate: 60,
-            preview_horizon: 6.0,
+            preview_horizon: 5.0,
             vehicle: VehicleTuning::default(),
-            control: ControlTuning::default(),
             planner: PlannerTuning::default(),
             keyboard: KeyboardTuning::default(),
         }
@@ -121,42 +119,23 @@ impl Default for VehicleTuning {
     }
 }
 
-/// Path follower and speed controller.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct ControlTuning {
-    /// Pure-pursuit lookahead distance: `lookahead_base + lookahead_per_speed · speed` (m).
-    pub lookahead_base: f32,
-    pub lookahead_per_speed: f32,
-    /// Speed controller gain, (m/s²) per (m/s) of speed error.
-    pub speed_gain: f32,
-    /// Acceleration / deceleration used by speed profiles (m/s²).
-    pub plan_accel: f32,
-    pub plan_decel: f32,
-}
-
-impl Default for ControlTuning {
-    fn default() -> Self {
-        Self { lookahead_base: 3.0, lookahead_per_speed: 0.3, speed_gain: 2.0, plan_accel: 4.0, plan_decel: 6.0 }
-    }
-}
-
-/// Path fitting and drag-tool defaults.
+/// Planning tool defaults.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PlannerTuning {
-    /// Bézier handle length as a fraction of the chord: `handle_base + handle_turn · turn/π`.
-    pub handle_base: f32,
-    pub handle_turn: f32,
-    /// Distance between resampled path points (m).
-    pub path_spacing: f32,
-    /// Cruise speed of a new segment that starts from (near) standstill (m/s).
-    pub default_cruise: f32,
+    /// Throttle of a new keypoint when the car would otherwise sit still.
+    pub default_throttle: f32,
+    /// Throttle change per mouse-wheel notch.
+    pub throttle_step: f32,
+    /// Range searched by the drag tool in lateral-g mode (± g).
+    pub max_lateral_g: f32,
+    /// Length of a keypoint added with the "straight" button (s).
+    pub straight_seconds: f32,
 }
 
 impl Default for PlannerTuning {
     fn default() -> Self {
-        Self { handle_base: 0.33, handle_turn: 0.25, path_spacing: 0.25, default_cruise: 12.0 }
+        Self { default_throttle: 0.4, throttle_step: 0.05, max_lateral_g: 2.0, straight_seconds: 1.0 }
     }
 }
 

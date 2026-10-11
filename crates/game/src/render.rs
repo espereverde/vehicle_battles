@@ -21,7 +21,6 @@ impl Plugin for RenderPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Trails>()
             .init_resource::<CameraFollow>()
-            .init_resource::<ScrollUsed>()
             .insert_resource(ClearColor(Color::srgb(0.09, 0.10, 0.11)))
             .add_systems(Startup, spawn_camera)
             .add_systems(
@@ -59,8 +58,8 @@ impl Traction {
     fn trail_color(self) -> Color {
         match self {
             Self::Grip => css::WHITE.with_alpha(0.25),
-            Self::Understeer => css::DEEP_SKY_BLUE.with_alpha(0.8),
-            Self::Slide => css::ORANGE.with_alpha(0.8),
+            Self::Understeer => css::ORANGE.with_alpha(0.8),
+            Self::Slide => css::RED.with_alpha(0.8),
         }
         .into()
     }
@@ -86,12 +85,13 @@ impl Trails {
     }
 }
 
-/// Grip-demand zone color: green < comfort < yellow < limit < red; sliding is orange.
+/// Grip-demand zone color: green < comfort < yellow < limit < orange (understeer);
+/// sliding is red.
 pub fn zone_color(demand: f32, sliding: bool, vt: &VehicleTuning) -> Color {
     if sliding {
-        css::ORANGE.into()
-    } else if demand > 1.0 {
         css::RED.into()
+    } else if demand > 1.0 {
+        css::ORANGE.into()
     } else if demand > vt.comfort_demand {
         css::YELLOW.into()
     } else {
@@ -118,9 +118,10 @@ impl Default for CameraFollow {
     }
 }
 
-/// Set by the planning tools when the scroll wheel edited something this frame.
-#[derive(Resource, Default)]
-pub struct ScrollUsed(pub bool);
+/// Ctrl+wheel zooms; the plain wheel belongs to the planning tools.
+pub fn zoom_modifier(keys: &ButtonInput<KeyCode>) -> bool {
+    keys.any_pressed([KeyCode::ControlLeft, KeyCode::ControlRight])
+}
 
 /// Camera access for world ↔ screen conversions.
 #[derive(SystemParam)]
@@ -168,8 +169,8 @@ fn spawn_camera(mut commands: Commands) {
     ));
 }
 
-pub fn zoom_camera(scroll: Res<AccumulatedMouseScroll>, mut used: ResMut<ScrollUsed>, mut projection: Single<&mut Projection>) {
-    if scroll.delta.y == 0.0 || std::mem::take(&mut used.0) {
+fn zoom_camera(scroll: Res<AccumulatedMouseScroll>, keys: Res<ButtonInput<KeyCode>>, mut projection: Single<&mut Projection>) {
+    if scroll.delta.y == 0.0 || !zoom_modifier(&keys) {
         return;
     }
     if let Projection::Orthographic(ortho) = projection.as_mut() {

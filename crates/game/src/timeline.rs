@@ -1,8 +1,11 @@
-//! Timeline bar (while paused): grip-demand strip, segment spans and target hits along the
-//! preview horizon. Drag to scrub the ghost car; click a span to select its segment.
+//! Plan window (while paused): turn mode and straight buttons, a timeline with the
+//! grip-demand strip, keypoint spans and target hits along the preview horizon, and an
+//! editor for the selected keypoint. Drag the timeline to scrub the ghost car; click a span
+//! to select its keypoint.
 
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
+use sim::{Turn, TurnMode};
 
 use crate::challenge::Challenge;
 use crate::planning::{Draft, PlanPreview};
@@ -34,7 +37,6 @@ fn timeline(
     let ctx = contexts.ctx_mut()?;
     // Reborrow so disjoint fields can be borrowed separately.
     let (draft, plan) = (&mut *draft, &mut *plan);
-    let car = sim.player_car();
     let rate = tuning.tick_rate as f32;
     egui::Window::new("Plan")
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -10.0])
@@ -46,12 +48,25 @@ fn timeline(
                     next.set(AppState::Running);
                 }
                 if ui.add_enabled(draft.edited, egui::Button::new("Revert (Esc)")).clicked() {
-                    draft.reset(&car.orders);
+                    draft.reset(&sim.player_car().orders);
                 }
                 if ui.add_enabled(!draft.orders.segments.is_empty(), egui::Button::new("Clear")).clicked() {
-                    draft.clear(car, &tuning.planner);
+                    draft.clear();
                 }
-                ui.label(format!("{} segment(s){}", draft.orders.segments.len(), if draft.edited { " — edited" } else { "" }));
+                ui.separator();
+                ui.label("Turn (T):");
+                let shown = draft.shown_mode();
+                for (mode, label) in [(TurnMode::Steer, "Steering"), (TurnMode::Lateral, "G-force")] {
+                    if ui.selectable_label(shown == mode, label).clicked() && shown != mode {
+                        let keypoint = draft.selected.and_then(|k| plan.keypoint(k)).map(|f| f.pose.pos);
+                        draft.set_mode(mode, &sim, &tuning, keypoint);
+                    }
+                }
+                ui.separator();
+                let straight = if draft.selected.is_some() { "Straight (S)" } else { "+ Straight (S)" };
+                if ui.button(straight).on_hover_text("Drive straight, holding the current speed").clicked() {
+                    draft.straight(&sim, &tuning);
+                }
             });
 
             let Some(preview) = &plan.preview else { return };
@@ -59,12 +74,12 @@ fn timeline(
             let (rect, response) = ui.allocate_exact_size(egui::vec2(WIDTH, STRIP + SPANS + MARKS + 6.0), egui::Sense::click_and_drag());
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 3.0, egui::Color32::from_gray(25));
-            let x = |i: usize| rect.left() + rect.width() * i as f32 / n as f32;
+            let x = |i: usize| rect.left() + rect.width() * i.min(n) as f32 / n as f32;
             let tick_at = |px: f32| (((px - rect.left()) / rect.width()) * n as f32).round().clamp(0.0, n as f32) as usize;
 
             // Grip-demand strip, one run of equal color at a time.
             let frame = |i: usize| preview.frame(sim.player, i);
-            let color = |i: usize| frame(i).map_or(egui::Color32::BLACK, |f| to_egui(zone_color(f.grip_demand, f.slide.is_some(), &tuning.vehicle)));
+            let color = |i: usize| frame(i).map_or(egui::Color32::BLACK, |f| to_egui(zone_color(f.grip_demand, PlanPreview::would_slide(f, &tuning.vehicle), &tuning.vehicle)));
             let strip_y = rect.top() + 2.0..=rect.top() + 2.0 + STRIP;
             let mut run_start = 0;
             for i in 1..=n {
@@ -75,25 +90,26 @@ fn timeline(
                 }
             }
 
-            // Segment spans: completed segments, then the one still running at the horizon,
-            // then "hold" once all orders are done.
+            // Keypoint spans, then "continue" (last controls kept) up to the horizon.
             let span_y = rect.top() + 4.0 + STRIP..=rect.top() + 4.0 + STRIP + SPANS;
             let mut spans = Vec::new();
             let mut start = 0;
-            for (k, &end) in plan.segment_ends.iter().enumerate() {
-                spans.push((start, end, Some(k)));
+            for (k, &end) in plan.ends.iter().enumerate() {
+                if start >= n {
+                    break;
+                }
+                spans.push((start, end.min(n), Some(k)));
                 start = end;
             }
             if start < n {
-                let k = plan.segment_ends.len();
-                spans.push((start, n, (k < draft.orders.segments.len()).then_some(k)));
+                spans.push((start, n, None));
             }
             for &(a, b, k) in &spans {
                 let r = egui::Rect::from_x_y_ranges(x(a) + 1.0..=x(b) - 1.0, span_y.clone());
                 let (fill, label) = match k {
                     Some(k) if draft.selected == Some(k) => (egui::Color32::from_rgb(0, 110, 120), format!("#{}", k + 1)),
                     Some(k) => (egui::Color32::from_gray(if k % 2 == 0 { 60 } else { 75 }), format!("#{}", k + 1)),
-                    None => (egui::Color32::from_gray(38), "hold".into()),
+                    None => (egui::Color32::from_gray(38), "continue".into()),
                 };
                 painter.rect_filled(r, 2.0, fill);
                 if r.width() > 24.0 {
@@ -107,6 +123,12 @@ fn timeline(
                 let px = x((s as f32 * rate) as usize);
                 painter.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, marks_y)], (1.0, egui::Color32::from_white_alpha(40)));
                 painter.text(egui::pos2(px, marks_y + 1.0), egui::Align2::CENTER_TOP, format!("{s}s"), egui::FontId::proportional(10.0), egui::Color32::GRAY);
+            }
+            let magenta = egui::Color32::from_rgb(255, 90, 200);
+            for &tick in &plan.off_track {
+                let px = x(tick);
+                painter.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, marks_y)], (2.0, magenta));
+                painter.text(egui::pos2(px + 3.0, marks_y + 1.0), egui::Align2::LEFT_TOP, "OFF", egui::FontId::proportional(11.0), magenta);
             }
             for &(target, tick) in &plan.hits {
                 let p = egui::pos2(x(tick), marks_y + 1.0);
@@ -125,48 +147,79 @@ fn timeline(
             painter.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())], (2.0, egui::Color32::YELLOW));
 
             if let Some(f) = frame(plan.scrub) {
-                let traction = match f.slide {
-                    Some(_) => "SLIDE",
-                    None if f.grip_demand > 1.0 => "understeer",
-                    None => "",
+                let traction = if PlanPreview::would_slide(f, &tuning.vehicle) {
+                    "would SLIDE (not simulated)"
+                } else if f.grip_demand > 1.0 {
+                    "would understeer (not simulated)"
+                } else {
+                    ""
                 };
                 ui.monospace(format!(
-                    "t = {:4.2} s   {:5.1} m/s   grip {:3.0}%  {traction}",
+                    "t = {:4.2} s   speed {:5.1} km/h   accel {:+6.1} km/h/s   grip {:3.0}%  {traction}",
                     plan.scrub as f32 / rate,
-                    f.vel.length(),
+                    crate::ui::kmh(f.vel.length()),
+                    crate::ui::kmh(f.accel.dot(f.vel.normalize_or_zero())),
                     f.grip_demand * 100.0
                 ));
+            }
+            let beyond = plan.ends.iter().filter(|&&e| e > n).count();
+            if beyond > 0 {
+                ui.small(format!("{beyond} keypoint(s) end beyond the {:.0} s preview", n as f32 / rate));
             }
             if challenge.done() {
                 ui.small("Course complete — R to retry, N for a new course.");
             }
-            segment_editor(ui, draft, car, &tuning);
+            keypoint_editor(ui, draft, &tuning);
         });
 
     Ok(())
 }
 
-/// Exact values for the selected segment (scroll over its ghost for quick changes).
-fn segment_editor(ui: &mut egui::Ui, draft: &mut Draft, car: &sim::Car, tuning: &sim::Tuning) {
+/// Exact values for the selected keypoint's segment.
+fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, tuning: &sim::Tuning) {
     let Some(k) = draft.selected.filter(|&k| k < draft.orders.segments.len()) else { return };
-    let top = tuning.vehicle.top_speed.floor();
+    let rate = tuning.tick_rate as f32;
     let (mut changed, mut delete) = (false, false);
     ui.separator();
     ui.horizontal(|ui| {
         let seg = &mut draft.orders.segments[k];
-        let (length, start) = (seg.length(), seg.speed().start);
-        let speed = seg.speed_mut();
-        ui.strong(format!("Segment #{}", k + 1));
-        ui.label("end");
-        changed |= ui.add(egui::DragValue::new(&mut speed.end).speed(0.2).range(0.0..=top).suffix(" m/s")).changed();
-        ui.label("cruise");
-        changed |= ui.add(egui::DragValue::new(&mut speed.cruise).speed(0.2).range(1.0..=top).suffix(" m/s")).changed();
-        ui.small(format!("{length:.1} m from {start:.1} m/s"));
+        ui.strong(format!("Keypoint #{}", k + 1));
+
+        let mut throttle = seg.drive.throttle * 100.0;
+        ui.label("throttle");
+        if ui.add(egui::DragValue::new(&mut throttle).speed(1.0).range(-100.0..=100.0).fixed_decimals(0).suffix(" %")).changed() {
+            seg.drive.throttle = throttle / 100.0;
+            changed = true;
+        }
+
+        match &mut seg.drive.turn {
+            Turn::Steer(s) => {
+                let mut pct = *s * 100.0;
+                ui.label("steer");
+                if ui.add(egui::DragValue::new(&mut pct).speed(0.5).range(-100.0..=100.0).fixed_decimals(1).suffix(" %")).changed() {
+                    *s = pct / 100.0;
+                    changed = true;
+                }
+            }
+            Turn::Lateral(g) => {
+                ui.label("lateral");
+                let max = tuning.planner.max_lateral_g;
+                changed |= ui.add(egui::DragValue::new(g).speed(0.01).range(-max..=max).fixed_decimals(2).suffix(" g")).changed();
+            }
+        }
+
+        let mut secs = seg.ticks as f32 / rate;
+        let min = (seg.elapsed + 1) as f32 / rate;
+        ui.label("duration");
+        if ui.add(egui::DragValue::new(&mut secs).speed(0.02).range(min..=60.0).fixed_decimals(2).suffix(" s")).changed() {
+            seg.ticks = ((secs * rate).round() as u32).max(seg.elapsed + 1);
+            changed = true;
+        }
         delete = ui.button("Delete (Del)").clicked();
     });
     if delete {
-        draft.delete(k, car, &tuning.planner);
+        draft.delete(k);
     } else if changed {
-        draft.changed(car, &tuning.planner);
+        draft.changed();
     }
 }

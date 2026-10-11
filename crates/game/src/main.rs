@@ -8,6 +8,7 @@ mod planning;
 mod render;
 mod replay;
 mod timeline;
+mod track;
 mod tuning_file;
 mod ui;
 
@@ -15,7 +16,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy_egui::EguiPlugin;
 use bevy_egui::input::egui_wants_any_keyboard_input;
-use sim::{CarId, Command, DriveMode, OrderQueue, Pose, Preview, SimEvent, SimState, StepMode, Tuning, World};
+use sim::{CarId, Command, Drive, DriveMode, OrderQueue, Pose, Preview, SimEvent, SimState, StepMode, Tuning, World};
 
 #[derive(States, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppState {
@@ -58,7 +59,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Vehicle Battles — M1".into(),
+                title: "Vehicle Battles — M1 (keypoints)".into(),
                 ..default()
             }),
             ..default()
@@ -76,6 +77,7 @@ fn main() {
             planning::PlanningPlugin,
             timeline::TimelinePlugin,
             challenge::ChallengePlugin,
+            track::TrackPlugin,
             manual::ManualPlugin,
             replay::ReplayPlugin,
             ui::UiPlugin,
@@ -98,8 +100,16 @@ fn hotkeys(
             AppState::Paused => AppState::Running,
         });
     }
-    let restart = keys.just_pressed(KeyCode::KeyR);
-    let new_course = keys.just_pressed(KeyCode::KeyN);
+    let switch_mode = keys.just_pressed(KeyCode::KeyC);
+    if switch_mode {
+        let mode = &mut *stepper.mode;
+        *mode = match *mode {
+            track::Mode::Track => track::Mode::Parking,
+            track::Mode::Parking => track::Mode::Track,
+        };
+    }
+    let restart = keys.just_pressed(KeyCode::KeyR) || switch_mode;
+    let new_course = keys.just_pressed(KeyCode::KeyN) && *stepper.mode == track::Mode::Parking;
     if restart || new_course {
         stepper.reset(new_course);
         draft.reset(&stepper.sim.player_car().orders);
@@ -112,8 +122,10 @@ fn hotkeys(
             DriveMode::Direct => DriveMode::Orders,
         };
         stepper.command(Command::SetDriveMode { car: player, mode });
-        // Back to orders: hold whatever course and speed the car has now.
-        stepper.command(Command::SetOrders { car: player, orders: OrderQueue::default() });
+        // Back to orders: drive straight on at the current speed.
+        let car = stepper.sim.player_car();
+        let tail = Drive::straight_at(draft.mode, car.forward_speed().max(0.0), &stepper.tuning.vehicle);
+        stepper.command(Command::SetOrders { car: player, orders: OrderQueue { segments: Vec::new(), tail } });
         stepper.check.stop();
         draft.reset(&stepper.sim.player_car().orders);
     }
@@ -132,6 +144,9 @@ pub struct Stepper<'w> {
     pub recorder: ResMut<'w, replay::Recorder>,
     pub check: ResMut<'w, planning::RealityCheck>,
     pub challenge: ResMut<'w, challenge::Challenge>,
+    track_run: ResMut<'w, track::TrackRun>,
+    track: Res<'w, track::TrackRes>,
+    pub mode: ResMut<'w, track::Mode>,
     input: Res<'w, manual::DriveInput>,
     trails: ResMut<'w, render::Trails>,
 }
@@ -158,7 +173,14 @@ impl Stepper<'_> {
         self.log.0.drain(..excess);
         self.trails.record(&sim.state);
         self.check.observe(&sim.state);
-        self.challenge.update(&sim.state, player);
+        match *self.mode {
+            track::Mode::Parking => self.challenge.update(&sim.state, player),
+            track::Mode::Track => {
+                if let Some(track) = &self.track.track {
+                    self.track_run.update(&sim.state, player, track);
+                }
+            }
+        }
     }
 
     /// Records a preview of the current state so live execution can be compared with it.
@@ -179,5 +201,6 @@ impl Stepper<'_> {
         *self.recorder = replay::Recorder::new(&self.sim.state, &self.tuning);
         self.check.stop();
         self.challenge.restart(new_course);
+        self.track_run.restart();
     }
 }
