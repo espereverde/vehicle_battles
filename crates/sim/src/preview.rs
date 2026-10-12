@@ -1,11 +1,14 @@
 //! The preview *is* the simulation: fork the state, run the same `step()` in
 //! `StepMode::Preview`, and keep a compact per-tick record of every car.
 
+use std::f32::consts::TAU;
+
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
 use crate::state::{CarId, Controls, Pose, SimState, SlideState};
 use crate::tuning::Tuning;
+use crate::vehicle::wrap_angle;
 use crate::{Car, SimEvent, StepMode, World, step};
 
 /// Everything about a car that changes tick to tick, minus the (large) order paths.
@@ -77,6 +80,29 @@ impl Preview {
 
     pub fn ticks(&self) -> usize {
         self.frames.len() - 1
+    }
+
+    /// First tick at which `car` has turned a full circle (net heading change of 360° since
+    /// the start), if it does: from there on the path only repeats its loop.
+    pub fn first_loop(&self, car: CarId) -> Option<usize> {
+        let mut turned = 0.0;
+        let mut heading = self.frame(car, 0)?.pose.heading;
+        for i in 1..=self.ticks() {
+            let h = self.frame(car, i)?.pose.heading;
+            turned += wrap_angle(h - heading);
+            heading = h;
+            if turned.abs() >= TAU {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    /// Drops everything after `ticks` ticks.
+    pub fn cut(&mut self, ticks: usize) {
+        self.frames.truncate(ticks + 1);
+        let end = self.start_tick + ticks as u64;
+        self.events.retain(|e| e.tick() < end);
     }
 
     /// Frame of `car` at `i` ticks into the preview.

@@ -5,12 +5,14 @@
 //! path, and the preview's grip coloring warns about it.
 
 use std::cmp::Ordering;
+use std::f32::consts::TAU;
 
 use glam::Vec2;
 
 use crate::orders::{Drive, OrderQueue, Turn, TurnMode};
 use crate::state::{CarId, DriveMode, SimState};
 use crate::tuning::Tuning;
+use crate::vehicle::wrap_angle;
 use crate::{StepMode, World, step};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -38,6 +40,9 @@ const MAX_MINIMA: usize = 8;
 /// for the segment that brings `car` closest to `target`, starting from `state` and
 /// assuming unlimited grip. Ties keep the earliest tick, so a car that stops short of the
 /// target gets its keypoint where it stops.
+///
+/// `turned` is the net heading change since the preview started (radians, + = left). A
+/// candidate ends before that reaches a full circle, so keypoints stay on the first loop.
 #[allow(clippy::too_many_arguments)]
 pub fn fit_segment(
     state: &SimState,
@@ -48,6 +53,7 @@ pub fn fit_segment(
     throttle: f32,
     target: Vec2,
     max_ticks: u32,
+    turned: f32,
 ) -> Fit {
     let max_ticks = max_ticks.max(1);
     let eval = |value: f32| -> Fit {
@@ -58,9 +64,16 @@ pub fn fit_segment(
             c.orders = OrderQueue { segments: Vec::new(), tail: Drive { turn, throttle } };
         }
         let mut best = Fit { turn, ticks: 1, miss: f32::INFINITY };
+        let mut turned = turned;
+        let mut heading = s.car(car).map_or(0.0, |c| c.pose.heading);
         for t in 1..=max_ticks {
             step(&mut s, world, tuning, StepMode::Ideal);
             let Some(c) = s.car(car) else { break };
+            turned += wrap_angle(c.pose.heading - heading);
+            heading = c.pose.heading;
+            if turned.abs() >= TAU {
+                break;
+            }
             let fit = Fit { turn, ticks: t, miss: c.pose.pos.distance(target) };
             if fit.cmp(&best).is_lt() {
                 best = fit;
@@ -69,13 +82,17 @@ pub fn fit_segment(
         best
     };
 
-    // Grip-limited steering at speed is a small fraction of full lock, so steering samples
-    // are spaced cubically (dense near zero). Lateral g is already in grip units.
+    // Turns are searched up to `max_lateral_g`; in steering mode that is the steering giving
+    // that much lateral g at the start speed. Grip-limited steering at speed is a small
+    // fraction of full lock, so steering samples are spaced cubically (dense near zero).
+    let max_g = tuning.planner.max_lateral_g;
+    let v0 = state.car(car).map_or(0.0, |c| c.forward_speed().max(0.0));
+    let max_steer = Turn::Lateral(max_g).steer(v0, &tuning.vehicle).abs();
     let samples: Vec<f32> = (0..COARSE)
         .map(|i| -1.0 + 2.0 * i as f32 / (COARSE - 1) as f32)
         .map(|u| match mode {
-            TurnMode::Steer => u * u * u,
-            TurnMode::Lateral => u * tuning.planner.max_lateral_g,
+            TurnMode::Steer => u * u * u * max_steer,
+            TurnMode::Lateral => u * max_g,
         })
         .collect();
     let coarse: Vec<Fit> = samples.iter().map(|&v| eval(v)).collect();

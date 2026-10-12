@@ -47,7 +47,7 @@
     planner: (
         default_throttle: 0.4,      // new keypoint throttle when the car would sit still
         throttle_step: 0.05,        // per mouse-wheel notch
-        max_lateral_g: 2.0,         // drag search range in g-force mode
+        max_lateral_g: 3.0,         // tightest planned turn (g), both turn modes
         straight_seconds: 1.0,      // length of a keypoint added with "Straight"
     ),
     // Debug keyboard driving (M key toggles manual mode).

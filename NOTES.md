@@ -136,7 +136,14 @@ Simplified:
   keypoint past the horizon, where it vanished). Refitting a keypoint only lets it move between
   the previous and the next keypoint's times; the next segment absorbs the change. Deleting one
   lengthens the next segment. Positions of later keypoints still follow from the simulation.
+  The segment editor's duration field follows the same rule (`Draft::set_ticks`).
   This lives in the game's draft editing; `sim::Segment` still stores durations.
+- The preview is cut where the path closes its first loop (net heading change of 360° since the
+  preview start; `Preview::first_loop`), paused and running. The fit gets the heading turned so
+  far and stops candidates before a full circle, so keypoints always sit on the first loop
+  (it used to reach a target on the second lap with a gentler turn).
+- Turn cap for the drag tool: `max_lateral_g` raised from 2.0 to 3.0 g (2× grip) and now applied
+  to steering mode too, as the steering that gives that much lateral g at the segment's start speed.
 
 Playtest (needs a human):
 - [ ] Is the drag stable now? Do red/orange warnings make slides feel fair when they happen live?

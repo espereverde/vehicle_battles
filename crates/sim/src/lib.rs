@@ -50,6 +50,14 @@ pub enum SimEvent {
     SegmentCompleted { car: CarId, tick: u64, remaining: usize },
 }
 
+impl SimEvent {
+    pub fn tick(&self) -> u64 {
+        match *self {
+            SimEvent::SlideStarted { tick, .. } | SimEvent::SlideEnded { tick, .. } | SimEvent::SegmentCompleted { tick, .. } => tick,
+        }
+    }
+}
+
 /// Everything that happened during one `step`, for UI, auto-pause triggers and metrics.
 #[derive(Debug, Clone, Default)]
 pub struct StepEvents {

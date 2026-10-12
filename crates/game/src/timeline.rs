@@ -164,7 +164,8 @@ fn timeline(
             }
             let beyond = plan.ends.iter().filter(|&&e| e > n).count();
             if beyond > 0 {
-                ui.small(format!("{beyond} keypoint(s) end beyond the {:.0} s preview", n as f32 / rate));
+                let why = if (n as u32) < tuning.preview_ticks() { ", cut where the path closes a loop" } else { "" };
+                ui.small(format!("{beyond} keypoint(s) end beyond the {:.1} s preview{why}", n as f32 / rate));
             }
             if challenge.done() {
                 ui.small("Course complete — R to retry, N for a new course.");
@@ -180,6 +181,8 @@ fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, tuning: &sim::Tuning) {
     let Some(k) = draft.selected.filter(|&k| k < draft.orders.segments.len()) else { return };
     let rate = tuning.tick_rate as f32;
     let (mut changed, mut delete) = (false, false);
+    let max_secs = draft.max_ticks(k, tuning) as f32 / rate;
+    let mut new_ticks = None;
     ui.separator();
     ui.horizontal(|ui| {
         let seg = &mut draft.orders.segments[k];
@@ -208,18 +211,23 @@ fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, tuning: &sim::Tuning) {
             }
         }
 
+        // Later keypoints keep their times: the duration is bounded by the next keypoint.
         let mut secs = seg.ticks as f32 / rate;
         let min = (seg.elapsed + 1) as f32 / rate;
         ui.label("duration");
-        if ui.add(egui::DragValue::new(&mut secs).speed(0.02).range(min..=60.0).fixed_decimals(2).suffix(" s")).changed() {
-            seg.ticks = ((secs * rate).round() as u32).max(seg.elapsed + 1);
-            changed = true;
+        if ui.add(egui::DragValue::new(&mut secs).speed(0.02).range(min..=max_secs).fixed_decimals(2).suffix(" s")).changed() {
+            new_ticks = Some((secs * rate).round() as u32);
         }
         delete = ui.button("Delete (Del)").clicked();
     });
     if delete {
         draft.delete(k);
-    } else if changed {
+        return;
+    }
+    if changed {
         draft.changed();
+    }
+    if let Some(ticks) = new_ticks {
+        draft.set_ticks(k, ticks, tuning);
     }
 }

@@ -118,7 +118,7 @@ fn fit_finds_a_reachable_point() {
         run_ticks_in(StepMode::Ideal, &mut s, &tuning, ticks);
         let target = s.cars[0].pose.pos;
 
-        let fit = fit_segment(&start, &world, &tuning, s.cars[0].id, mode, 0.3, target, 300);
+        let fit = fit_segment(&start, &world, &tuning, s.cars[0].id, mode, 0.3, target, 300, 0.0);
         assert!(fit.miss < 0.3, "{mode:?} {value}: missed by {} m", fit.miss);
         assert!((fit.ticks as i64 - ticks as i64).abs() <= 3, "{mode:?} {value}: {} ticks, expected {ticks}", fit.ticks);
         assert!((fit.turn.value() - value).abs() < 0.02, "{mode:?}: fitted {} expected {value}", fit.turn.value());
@@ -130,7 +130,7 @@ fn fit_stops_at_the_closest_point_for_unreachable_targets() {
     let tuning = Tuning::default();
     let start = car_at(10.0);
     // Far beyond what 1 s can cover: the fit uses the whole window, straight at the target.
-    let fit = fit_segment(&start, &World::default(), &tuning, start.cars[0].id, TurnMode::Steer, 0.0, Vec2::new(200.0, 0.0), 60);
+    let fit = fit_segment(&start, &World::default(), &tuning, start.cars[0].id, TurnMode::Steer, 0.0, Vec2::new(200.0, 0.0), 60, 0.0);
     assert_eq!(fit.ticks, 60);
     assert!(fit.turn.value().abs() < 0.01);
 }
@@ -149,6 +149,26 @@ fn ideal_matches_real_within_grip() {
         assert!(real.cars[0].grip_demand < 1.0, "{d:?} exceeds grip");
         assert_eq!(real.cars[0].pose, ideal.cars[0].pose, "{d:?}");
         assert_eq!(real.cars[0].vel, ideal.cars[0].vel, "{d:?}");
+    }
+}
+
+/// The drag tool never plans a turn tighter than `max_lateral_g`, in either turn mode
+/// (steering mode: measured at the segment's start speed).
+#[test]
+fn fit_caps_turns_at_max_lateral_g() {
+    let tuning = Tuning::default();
+    let vt = &tuning.vehicle;
+    let max_g = tuning.planner.max_lateral_g;
+    let start = car_at(20.0);
+    // Just ahead and to the side: reaching it takes about 6 g, so the tighter the better.
+    // One second only, so the car cannot loop around and come back closer.
+    for target in [Vec2::new(5.0, 10.0), Vec2::new(5.0, -10.0)] {
+        for mode in [TurnMode::Steer, TurnMode::Lateral] {
+            let fit = fit_segment(&start, &World::default(), &tuning, start.cars[0].id, mode, 0.0, target, 60, 0.0);
+            let g = fit.turn.convert(TurnMode::Lateral, 20.0, vt).value();
+            assert!(g.abs() <= max_g * 1.001, "{mode:?} {target}: planned {g} g");
+            assert!(g.abs() > max_g * 0.95, "{mode:?} {target}: expected the full {max_g} g, got {g}");
+        }
     }
 }
 
@@ -180,15 +200,16 @@ fn fit_assumes_unlimited_grip() {
     let tuning = Tuning::default();
     let world = World::default();
     let start = car_at(19.0);
-    let hard = drive(Turn::Steer(0.6), -0.2);
+    // About 2.5 g: well past the grip limit (1.5 g), within the planning cap (3 g).
+    let hard = drive(Turn::Steer(0.3), -0.2);
     let mut s = start.clone();
     s.cars[0].orders = OrderQueue { segments: Vec::new(), tail: hard };
     run_ticks_in(StepMode::Ideal, &mut s, &tuning, 48);
-    assert!(s.cars[0].grip_demand > 2.0, "not past the limit: {}", s.cars[0].grip_demand);
+    assert!(s.cars[0].grip_demand > 1.2, "not past the limit: {}", s.cars[0].grip_demand);
     let target = s.cars[0].pose.pos;
-    let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, TurnMode::Steer, -0.2, target, 120);
+    let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, TurnMode::Steer, -0.2, target, 120, 0.0);
     assert!(fit.miss < 0.1, "missed by {} m with {:?}", fit.miss, fit.turn);
-    assert!((fit.turn.value() - 0.6).abs() < 0.01, "fitted {:?}", fit.turn);
+    assert!((fit.turn.value() - 0.3).abs() < 0.01, "fitted {:?}", fit.turn);
 
     let mut real = start.clone();
     real.cars[0].orders = OrderQueue { segments: Vec::new(), tail: hard };
@@ -199,7 +220,7 @@ fn fit_assumes_unlimited_grip() {
     let mut last = 0.0;
     for i in 0..=20 {
         let p = Vec2::new(target.x, i as f32 * 0.25);
-        let v = fit_segment(&start, &world, &tuning, start.cars[0].id, TurnMode::Steer, -0.2, p, 120).turn.value();
+        let v = fit_segment(&start, &world, &tuning, start.cars[0].id, TurnMode::Steer, -0.2, p, 120, 0.0).turn.value();
         assert!(v >= last - 1e-3 && v - last < 0.05, "offset {} m: steer {last} -> {v}", i as f32 * 0.25);
         last = v;
     }
@@ -290,7 +311,7 @@ fn drag_fit_is_continuous() {
             run_ticks(&mut start, &tuning, 30);
             let base = start.cars[0].pose;
             let keypoint = |cursor: Vec2| {
-                let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, mode, throttle, cursor, 300);
+                let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, mode, throttle, cursor, 300, 0.0);
                 let mut s = start.clone();
                 s.cars[0].orders = OrderQueue { segments: Vec::new(), tail: drive(fit.turn, throttle) };
                 run_ticks_in(StepMode::Ideal, &mut s, &tuning, fit.ticks);
@@ -323,7 +344,7 @@ fn fit_stops_where_the_car_stops_when_braking() {
     let start = car_at(20.0);
     for mode in [TurnMode::Steer, TurnMode::Lateral] {
         for target in [Vec2::new(25.0, 0.0), Vec2::new(30.0, 4.0), Vec2::new(28.0, -6.0)] {
-            let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, mode, -1.0, target, 300);
+            let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, mode, -1.0, target, 300, 0.0);
             let mut s = start.clone();
             s.cars[0].orders = OrderQueue { segments: Vec::new(), tail: drive(fit.turn, -1.0) };
             run_ticks_in(StepMode::Ideal, &mut s, &tuning, fit.ticks);
@@ -333,5 +354,52 @@ fn fit_stops_where_the_car_stops_when_braking() {
             assert!(at_keypoint.distance(rest) < 0.01, "{mode:?} {target}: keypoint {at_keypoint} before the stop at {rest}");
             assert!(fit.ticks < 150, "{mode:?} {target}: keypoint at tick {}, long after stopping", fit.ticks);
         }
+    }
+}
+
+/// A tight constant turn closes a loop well within the horizon; the preview finds where
+/// and can be cut there.
+#[test]
+fn preview_finds_the_first_loop() {
+    let tuning = Tuning::default();
+    let mut s = car_at(10.0);
+    s.cars[0].orders = OrderQueue { segments: Vec::new(), tail: drive(Turn::Lateral(-3.0), hold_throttle(10.0, &tuning.vehicle)) };
+    let mut preview = Preview::run_in(StepMode::Ideal, &s, &World::default(), &tuning, tuning.preview_ticks());
+    // 3 g needs more than full lock at 10 m/s: r ≈ 3.9 m, one lap ≈ 2.4 s plus the ramp.
+    let i = preview.first_loop(s.cars[0].id).expect("loops");
+    assert!((140..=170).contains(&i), "loop closes at tick {i}");
+    let start = preview.frame(s.cars[0].id, 0).unwrap().pose.pos;
+    let closed = preview.frame(s.cars[0].id, i).unwrap().pose.pos;
+    // Not exact: the lap starts with the steering ramping up.
+    assert!(start.distance(closed) < 2.5, "loop end {closed} far from start {start}");
+    preview.cut(i);
+    assert_eq!(preview.ticks(), i);
+
+    // A gentle turn never closes.
+    s.cars[0].orders.tail = drive(Turn::Lateral(0.3), 0.0);
+    let preview = Preview::run_in(StepMode::Ideal, &s, &World::default(), &tuning, tuning.preview_ticks());
+    assert_eq!(preview.first_loop(s.cars[0].id), None);
+}
+
+/// With room for several laps, the fit must not reach the target on a later lap
+/// (regression: a 2.2 g second pass beat the 3 g first one).
+#[test]
+fn fit_stays_on_the_first_loop() {
+    let tuning = Tuning::default();
+    let world = World::default();
+    let start = car_at(20.0);
+    for turned in [0.0, 3.0] {
+        let target = Vec2::new(-5.0, 10.0);
+        let fit = fit_segment(&start, &world, &tuning, start.cars[0].id, TurnMode::Lateral, 0.0, target, 300, turned);
+        let mut s = start.clone();
+        s.cars[0].orders = OrderQueue { segments: Vec::new(), tail: drive(fit.turn, 0.0) };
+        let mut net = turned;
+        let mut heading = s.cars[0].pose.heading;
+        for _ in 0..fit.ticks {
+            run_ticks_in(StepMode::Ideal, &mut s, &tuning, 1);
+            net += sim::vehicle::wrap_angle(s.cars[0].pose.heading - heading);
+            heading = s.cars[0].pose.heading;
+        }
+        assert!(net.abs() < std::f32::consts::TAU, "turned {turned}: keypoint after a full circle ({net} rad, {:?})", fit);
     }
 }

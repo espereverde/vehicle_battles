@@ -104,36 +104,59 @@ impl Draft {
         self.dirty = true;
     }
 
-    /// The simulation at the start of segment `k`, as the preview sees it (`None` if it
-    /// starts beyond the preview).
-    fn start_state(&self, k: usize, sim: &Sim, tuning: &TuningRes) -> Option<SimState> {
+    /// The simulation at the start of segment `k`, as the preview sees it, and the net
+    /// heading change up to there (`None` if it starts beyond the preview or after the
+    /// first loop).
+    fn start_state(&self, k: usize, sim: &Sim, tuning: &TuningRes) -> Option<(SimState, f32)> {
         let start = self.orders.start_tick(k);
         if start >= tuning.preview_ticks() {
             return None;
         }
         let mut state = draft_state(sim, &self.orders);
+        let mut turned = 0.0;
         for _ in 0..start {
+            let before = state.car(sim.player)?.pose.heading;
             sim::step(&mut state, &sim.world, tuning, StepMode::Ideal);
+            turned += sim::vehicle::wrap_angle(state.car(sim.player)?.pose.heading - before);
         }
-        Some(state)
+        (turned.abs() < std::f32::consts::TAU).then_some((state, turned))
     }
 
     fn start_speed(&self, k: usize, sim: &Sim, tuning: &TuningRes) -> Option<f32> {
-        let state = self.start_state(k, sim, tuning)?;
+        let (state, _) = self.start_state(k, sim, tuning)?;
         Some(state.car(sim.player)?.forward_speed().max(0.0))
     }
 
+    /// Longest segment `k` may be (total ticks): its keypoint stays before the next one, and
+    /// the last one stays within the preview horizon.
+    pub fn max_ticks(&self, k: usize, tuning: &sim::Tuning) -> u32 {
+        let seg = &self.orders.segments[k];
+        match self.orders.segments.get(k + 1) {
+            Some(next) => seg.ticks + next.remaining() - 1,
+            None => seg.elapsed + tuning.preview_ticks().saturating_sub(self.orders.start_tick(k)).max(1),
+        }
+    }
+
+    /// Sets segment `k`'s length (clamped). Keypoints are anchored in time: the next segment
+    /// absorbs the change, so later keypoints keep their times.
+    pub fn set_ticks(&mut self, k: usize, ticks: u32, tuning: &sim::Tuning) {
+        let max = self.max_ticks(k, tuning);
+        let seg = &mut self.orders.segments[k];
+        let ticks = ticks.min(max).max(seg.elapsed + 1);
+        if ticks == seg.ticks {
+            return;
+        }
+        let old = std::mem::replace(&mut seg.ticks, ticks);
+        if let Some(next) = self.orders.segments.get_mut(k + 1) {
+            next.ticks = next.ticks + old - ticks;
+        }
+        self.changed();
+    }
+
     /// Refits segment `k`'s turn and duration so its keypoint lands as close as possible to
-    /// `target`, keeping its throttle and turn mode. Its keypoint stays before the next one,
-    /// which keeps its time: the next segment absorbs the change.
+    /// `target`, keeping its throttle and turn mode (see `set_ticks` for the timing).
     fn refit(&mut self, k: usize, target: Vec2, sim: &Sim, tuning: &TuningRes) {
-        let Some(state) = self.start_state(k, sim, tuning) else { return };
-        let start = self.orders.start_tick(k);
-        let next_end = (k + 1 < self.orders.segments.len()).then(|| self.orders.end_ticks()[k + 1]);
-        let max_ticks = match next_end {
-            Some(end) => end - start - 1,
-            None => tuning.preview_ticks().saturating_sub(start),
-        };
+        let Some((state, turned)) = self.start_state(k, sim, tuning) else { return };
         let seg = self.orders.segments[k];
         let fit = fit_segment(
             &state,
@@ -143,18 +166,14 @@ impl Draft {
             seg.drive.turn.mode(),
             seg.drive.throttle,
             target,
-            max_ticks,
+            self.max_ticks(k, tuning) - seg.elapsed,
+            turned,
         );
-        let seg = &mut self.orders.segments[k];
-        let new = Segment { drive: Drive { turn: fit.turn, ..seg.drive }, ticks: seg.elapsed + fit.ticks, ..*seg };
-        if new != *seg {
-            *seg = new;
-            if let Some(end) = next_end {
-                let next = &mut self.orders.segments[k + 1];
-                next.ticks = next.elapsed + end - start - fit.ticks;
-            }
+        if fit.turn != seg.drive.turn {
+            self.orders.segments[k].drive.turn = fit.turn;
             self.changed();
         }
+        self.set_ticks(k, seg.elapsed + fit.ticks, tuning);
     }
 
     /// Appends a keypoint aimed at `target`. Returns its index, or `None` when the existing
@@ -447,7 +466,7 @@ fn rebuild_preview(
     if draft.dirty || tuning.is_changed() || challenge.is_changed() || mode.is_changed() {
         draft.dirty = false;
         let state = draft_state(&sim, &draft.orders);
-        let preview = Preview::run_in(StepMode::Ideal, &state, &sim.world, &tuning, tuning.preview_ticks());
+        let preview = ideal_preview(&state, &sim, &tuning);
         plan.ends = draft.orders.end_ticks().into_iter().map(|t| t as usize).collect();
         plan.hits.clear();
         plan.off_track.clear();
@@ -486,7 +505,17 @@ fn follow_live(sim: Res<Sim>, tuning: Res<TuningRes>, mut plan: ResMut<PlanPrevi
     if plan.preview.as_ref().is_some_and(|p| p.start_tick == sim.state.tick) {
         return;
     }
-    plan.preview = Some(Preview::run_in(StepMode::Ideal, &sim.state, &sim.world, &tuning, tuning.preview_ticks()));
+    plan.preview = Some(ideal_preview(&sim.state, &sim, &tuning));
+}
+
+/// The player's preview without slides, cut where the path closes its first loop (after
+/// that it would only go round again).
+fn ideal_preview(state: &SimState, sim: &Sim, tuning: &TuningRes) -> Preview {
+    let mut preview = Preview::run_in(StepMode::Ideal, state, &sim.world, tuning, tuning.preview_ticks());
+    if let Some(i) = preview.first_loop(sim.player) {
+        preview.cut(i);
+    }
+    preview
 }
 
 fn player_frames<'a>(preview: &'a Preview, sim: &Sim) -> Vec<&'a CarFrame> {

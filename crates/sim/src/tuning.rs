@@ -127,7 +127,8 @@ pub struct PlannerTuning {
     pub default_throttle: f32,
     /// Throttle change per mouse-wheel notch.
     pub throttle_step: f32,
-    /// Range searched by the drag tool in lateral-g mode (± g).
+    /// Tightest turn the drag tool plans (± g). In steering mode it caps steering at the
+    /// segment's start speed (never past full lock).
     pub max_lateral_g: f32,
     /// Length of a keypoint added with the "straight" button (s).
     pub straight_seconds: f32,
@@ -135,7 +136,7 @@ pub struct PlannerTuning {
 
 impl Default for PlannerTuning {
     fn default() -> Self {
-        Self { default_throttle: 0.4, throttle_step: 0.05, max_lateral_g: 2.0, straight_seconds: 1.0 }
+        Self { default_throttle: 0.4, throttle_step: 0.05, max_lateral_g: 3.0, straight_seconds: 1.0 }
     }
 }
 
