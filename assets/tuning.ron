@@ -23,13 +23,10 @@
         grip: 1.5,
         slide_grip: 0.75,
 
-        // Grip demand zones: green < comfort_demand < yellow < 1.0 < red.
-        // Red up to slide_threshold = understeer (runs wide); beyond it = slide.
-        // Below slide_ref_speed (m/s) the threshold grows, so slow cars only understeer.
+        // Grip demand zones: green < comfort_demand < yellow < 1.0 < orange (understeer:
+        // runs wide). Slides come from the stability gauge (below) or the handbrake.
         comfort_demand: 0.7,
-        slide_threshold: 1.2,
         understeer_scrub: 0.3,   // g of drag per unit of demand over 1.0 (plowing)
-        slide_ref_speed: 15.0,
 
         // Slide behavior.
         slide_steer_authority: 0.35,
@@ -42,6 +39,21 @@
         handbrake_grip: 0.6,
         handbrake_yaw_gain: 1.8,
         handbrake_min_speed: 3.0,
+    ),
+    // Stability gauge: 1 = calm, 0 = certain loss of control.
+    stability: (
+        k_drain: 3.0,        // drain/s = k_drain * (demand - comfort)^2 above comfort
+        k_jerk: 0.05,        // drain per unit of grip-demand change (harsh transitions)
+        k_rec: 0.3,          // recovery/s = k_rec * pilot skill, below comfort
+        yellow: 0.6,         // below: risk checks roll for loss of control
+        risk_interval: 0.25, // s between checks (yellow zone, above comfort)
+        risk_max: 0.35,      // chance per check near 0: risk_max * (1 - s/yellow)^2
+        min_speed: 10.0,     // m/s (36 km/h); slower cars never lose control, they just understeer
+        skid_speed: 12.0,    // m/s; below: always a skid
+        spin_speed: 25.0,    // m/s; above: always a spin
+        skid_yaw_kick: 1.0,  // rad/s into the turn
+        spin_yaw_kick: 5.0,
+        after_loss: 0.3,     // stability right after losing control
     ),
     // Planning tool.
     planner: (

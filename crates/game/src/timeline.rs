@@ -25,6 +25,8 @@ const WIDTH: f32 = 720.0;
 const STRIP: f32 = 12.0;
 const SPANS: f32 = 20.0;
 const MARKS: f32 = 16.0;
+/// Stability graph (1 at the top, 0 at the bottom).
+const STAB: f32 = 30.0;
 
 #[allow(clippy::too_many_arguments)]
 fn timeline(
@@ -63,7 +65,7 @@ fn timeline(
                 ui.separator();
                 ui.label("Turn (T):");
                 let shown = draft.shown_mode();
-                for (mode, label) in [(TurnMode::Steer, "Steering"), (TurnMode::Lateral, "G-force")] {
+                for (mode, label) in [(TurnMode::Steer, "Steering"), (TurnMode::Lateral, "G-force"), (TurnMode::Swerve, "Swerve")] {
                     if ui.selectable_label(shown == mode, label).clicked() && shown != mode {
                         let keypoint = draft.selected.and_then(|k| plan.keypoint(k)).map(|f| f.pose.pos);
                         draft.set_mode(mode, &sim, &tuning, keypoint);
@@ -78,7 +80,7 @@ fn timeline(
 
             let Some(preview) = &plan.preview else { return };
             let n = preview.ticks().max(1);
-            let (rect, response) = ui.allocate_exact_size(egui::vec2(WIDTH, STRIP + SPANS + MARKS + 6.0), egui::Sense::click_and_drag());
+            let (rect, response) = ui.allocate_exact_size(egui::vec2(WIDTH, STRIP + SPANS + STAB + MARKS + 8.0), egui::Sense::click_and_drag());
             let painter = ui.painter_at(rect);
             painter.rect_filled(rect, 3.0, egui::Color32::from_gray(25));
             let x = |i: usize| rect.left() + rect.width() * i.min(n) as f32 / n as f32;
@@ -86,7 +88,7 @@ fn timeline(
 
             // Grip-demand strip, one run of equal color at a time.
             let frame = |i: usize| preview.frame(sim.player, i);
-            let color = |i: usize| frame(i).map_or(egui::Color32::BLACK, |f| to_egui(zone_color(f.grip_demand, PlanPreview::would_slide(f, &tuning.vehicle), &tuning.vehicle)));
+            let color = |i: usize| frame(i).map_or(egui::Color32::BLACK, |f| to_egui(zone_color(f.grip_demand, f.at_risk(&tuning), &tuning.vehicle)));
             let strip_y = rect.top() + 2.0..=rect.top() + 2.0 + STRIP;
             let mut run_start = 0;
             for i in 1..=n {
@@ -124,8 +126,28 @@ fn timeline(
                 }
             }
 
+            // Stability graph: the gauge over time, the yellow-zone line, and risk stretches as
+            // red bands labelled with their chance.
+            let stab_top = rect.top() + 6.0 + STRIP + SPANS;
+            let stab_y = |s: f32| stab_top + STAB * (1.0 - s.clamp(0.0, 1.0));
+            let st = &tuning.stability;
+            let yellow = stab_y(st.yellow);
+            painter.line_segment([egui::pos2(rect.left(), yellow), egui::pos2(rect.right(), yellow)], (1.0, egui::Color32::from_rgba_unmultiplied(255, 220, 0, 60)));
+            let red = egui::Color32::from_rgb(255, 70, 70);
+            for r in &plan.risks {
+                let band = egui::Rect::from_x_y_ranges(x(r.start) - 1.0..=x(r.end) + 1.0, stab_top..=stab_top + STAB);
+                painter.rect_filled(band, 0.0, red.gamma_multiply(if r.certain_at.is_some() { 0.45 } else { 0.1 + 0.4 * r.chance }));
+                let label = if r.certain_at.is_some() { "LOSS".to_string() } else { format!("{:.0}%", r.chance * 100.0) };
+                painter.text(egui::pos2(x(r.at()) + 2.0, stab_top + 1.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(10.0), egui::Color32::WHITE);
+            }
+            for i in 1..=n {
+                let (Some(a), Some(b)) = (frame(i - 1), frame(i)) else { break };
+                let c = if b.stability >= st.yellow { egui::Color32::LIGHT_GREEN } else { egui::Color32::YELLOW };
+                painter.line_segment([egui::pos2(x(i - 1), stab_y(a.stability)), egui::pos2(x(i), stab_y(b.stability))], (1.5, c));
+            }
+
             // Seconds and target hits.
-            let marks_y = rect.top() + 6.0 + STRIP + SPANS;
+            let marks_y = stab_top + STAB + 2.0;
             for s in 1..(n as f32 / rate).ceil() as usize {
                 let px = x((s as f32 * rate) as usize);
                 painter.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, marks_y)], (1.0, egui::Color32::from_white_alpha(40)));
@@ -141,6 +163,14 @@ fn timeline(
                 let p = egui::pos2(x(tick), marks_y + 1.0);
                 painter.text(p, egui::Align2::CENTER_TOP, format!("T{}", target + 1), egui::FontId::proportional(11.0), egui::Color32::LIGHT_GREEN);
             }
+            for &(gate, tick, ok) in &plan.gates {
+                let (label, color) = if ok { (format!("G{}", gate + 1), egui::Color32::LIGHT_GREEN) } else { (format!("G{}✗", gate + 1), red) };
+                painter.text(egui::pos2(x(tick), marks_y + 1.0), egui::Align2::CENTER_TOP, label, egui::FontId::proportional(11.0), color);
+            }
+            if let Some((tick, result)) = plan.finish {
+                let p = egui::pos2(x(tick), marks_y + 1.0);
+                painter.text(p, egui::Align2::CENTER_TOP, format!("FIN {result:.1}s"), egui::FontId::proportional(11.0), egui::Color32::WHITE);
+            }
 
             // Scrubbing and span selection.
             if let Some(pos) = response.interact_pointer_pos() {
@@ -154,20 +184,24 @@ fn timeline(
             painter.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())], (2.0, egui::Color32::YELLOW));
 
             if let Some(f) = frame(plan.scrub) {
-                let traction = if PlanPreview::would_slide(f, &tuning.vehicle) {
-                    "would SLIDE (not simulated)"
+                let traction = if f.at_risk(&tuning) {
+                    "may LOSE CONTROL (not simulated)"
                 } else if f.grip_demand > 1.0 {
                     "would understeer (not simulated)"
                 } else {
                     ""
                 };
                 ui.monospace(format!(
-                    "t = {:4.2} s   speed {:5.1} km/h   accel {:+6.1} km/h/s   grip {:3.0}%  {traction}",
+                    "t = {:4.2} s   speed {:5.1} km/h   accel {:+6.1} km/h/s   grip {:3.0}%   stability {:3.0}%  {traction}",
                     plan.scrub as f32 / rate,
                     crate::ui::kmh(f.vel.length()),
                     crate::ui::kmh(f.accel.dot(f.vel.normalize_or_zero())),
-                    f.grip_demand * 100.0
+                    f.grip_demand * 100.0,
+                    f.stability * 100.0
                 ));
+                for r in &plan.risks {
+                    ui.colored_label(red, PlanPreview::risk_label(r, rate));
+                }
             }
             let beyond = plan.ends.iter().filter(|&&e| e > n).count();
             if beyond > 0 {
@@ -215,6 +249,14 @@ fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, tuning: &sim::Tuning) {
                 ui.label("lateral");
                 let max = tuning.planner.max_lateral_g;
                 changed |= ui.add(egui::DragValue::new(g).speed(0.01).range(-max..=max).fixed_decimals(2).suffix(" g")).changed();
+            }
+            Turn::Swerve(rate) => {
+                let mut deg = rate.to_degrees();
+                ui.label("turn rate");
+                if ui.add(egui::DragValue::new(&mut deg).speed(0.5).range(-180.0..=180.0).fixed_decimals(1).suffix(" °/s")).changed() {
+                    *rate = deg.to_radians();
+                    changed = true;
+                }
             }
         }
 

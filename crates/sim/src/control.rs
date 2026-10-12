@@ -18,7 +18,8 @@ pub fn drive(car: &mut Car, vt: &VehicleTuning) -> usize {
         orders.tail = orders.segments.remove(0).drive;
         completed += 1;
     }
-    car.controls = orders.active_drive().controls(v, vt);
+    let phase = orders.segments.first().map(|s| (s.elapsed, s.ticks));
+    car.controls = orders.active_drive().controls(v, vt, phase);
     if let Some(seg) = orders.segments.first_mut() {
         seg.elapsed += 1;
         if seg.remaining() == 0 {

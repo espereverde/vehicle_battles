@@ -2688,6 +2688,7 @@ dependencies = [
  "bevy",
  "bevy_egui",
  "ron",
+ "serde",
  "sim",
 ]
 

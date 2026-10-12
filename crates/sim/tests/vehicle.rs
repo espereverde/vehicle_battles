@@ -58,11 +58,13 @@ fn gentle_turn_keeps_grip() {
     assert!(s.cars[0].slip_angle().abs() < 0.01);
 }
 
+/// Full lock at speed: the car understeers, drains its stability and loses control, then
+/// regains grip once the wheel is straightened.
 #[test]
-fn full_lock_at_speed_slides_then_recovers() {
+fn full_lock_at_speed_loses_control_then_recovers() {
     let mut s = car_at_speed(30.0);
     let events = drive(&mut s, full(0.0, 1.0), 1.0);
-    assert!(matches!(events.first(), Some(SimEvent::SlideStarted { .. })), "{events:?}");
+    assert!(events.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "{events:?}");
     assert!(s.cars[0].slip_angle().abs() > 0.1, "slide without slip angle");
 
     let events = drive(&mut s, full(0.0, 0.0), 4.0);
@@ -92,19 +94,23 @@ fn full_lock_at_low_speed_understeers_without_sliding() {
     assert!(max_lat.abs() <= vt.grip * vt.gravity * 1.001, "lateral accel {max_lat}");
 }
 
+/// Past the grip limit the tires alone never break into a slide: the car understeers until
+/// the stability gauge runs out.
 #[test]
-fn mild_overdrive_at_speed_understeers_strong_overdrive_slides() {
+fn overdrive_understeers_until_stability_runs_out() {
     let tuning = Tuning::default();
     let v: f32 = 25.0;
-    // Wheel angle that asks for a given lateral grip demand at speed v.
-    let steer_for = |demand: f32| {
-        let vt = &tuning.vehicle;
-        let delta = (demand * vt.grip * vt.gravity * vt.wheelbase / (v * v)).atan();
-        delta / tuning.vehicle.max_steer_deg.to_radians()
-    };
+    let vt = &tuning.vehicle;
+    // Wheel angle that asks for 1.5× the grip at speed v.
+    let delta = (1.5 * vt.grip * vt.gravity * vt.wheelbase / (v * v)).atan();
+    let steer = delta / vt.max_steer_deg.to_radians();
+
     let mut s = car_at_speed(v);
-    assert!(drive(&mut s, full(0.3, steer_for(1.1)), 1.0).is_empty(), "1.1 g should understeer");
-    let mut s = car_at_speed(v);
-    let events = drive(&mut s, full(0.3, steer_for(1.5)), 1.0);
-    assert!(matches!(events.first(), Some(SimEvent::SlideStarted { .. })), "1.5 g should slide");
+    s.cars[0].stability = 1.0;
+    let events = drive(&mut s, full(0.3, steer), 0.2);
+    assert!(events.is_empty(), "lost control before the gauge emptied: {events:?}");
+    assert!(s.cars[0].grip_demand > 1.0 && s.cars[0].slide.is_none());
+
+    let events = drive(&mut s, full(0.3, steer), 2.0);
+    assert!(events.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "{events:?}");
 }

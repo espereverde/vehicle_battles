@@ -1,0 +1,18 @@
+// Slalom (M2 playtest): pass through every gate, in order, then cross the finish line,
+// within the time limit. The car starts at the origin heading +x, at rest.
+// Gates alternate sides, so the car must weave; a missed gate costs `miss_penalty` seconds.
+//
+// Calibration (scripted driver, default tuning): comfortable driving (grip demand <= 0.7)
+// finishes in ~21.7 s, hard driving with stability still green in ~18.8 s; faster than that
+// the gauge drops into yellow and the car starts losing control.
+(
+    time_limit: 20.5,     // s, including penalties
+    miss_penalty: 2.0,    // s per missed gate
+    gate_width: 4.0,      // m between the two cones of a gate
+    // Gate centers (x, y). Cones sit at y ± gate_width / 2.
+    gates: [
+        (30.0, 5.0), (50.0, -5.0), (70.0, 5.0), (90.0, -5.0), (110.0, 5.0),
+        (130.0, -5.0), (150.0, 5.0), (170.0, -5.0), (190.0, 5.0), (210.0, -5.0),
+    ],
+    finish_x: 235.0,
+)

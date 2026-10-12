@@ -184,6 +184,12 @@ Reach marked target boxes (position + heading + max speed) in an empty arena, ag
 **Playable test: "Slalom"**
 Gate course with a time limit tight enough that safe driving fails it.
 
+*As built (see NOTES.md):* stability alone decides loss of control: past the grip limit the
+tires only understeer, there is no fixed slide threshold. The preview stays slide-free (M1
+rework) and shows risk instead of simulating it. Swerve became a turn mode (an S-curve of two equal
+halves, ending parallel to where it started) rather than a template; bootlegger, T-stop and controlled
+skid need handbrake/reverse segments and come after the slalom playtest.
+
 **Gate questions**
 - Do players push into yellow on purpose? Do crashes feel fair (preview warned them)?
 - Is the pause → plan → watch rhythm enjoyable without any combat?

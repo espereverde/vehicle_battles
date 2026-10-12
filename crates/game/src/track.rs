@@ -32,6 +32,18 @@ pub enum Mode {
     #[default]
     Track,
     Parking,
+    Slalom,
+}
+
+impl Mode {
+    /// The next mode for the C key.
+    pub fn next(self) -> Self {
+        match self {
+            Mode::Track => Mode::Parking,
+            Mode::Parking => Mode::Slalom,
+            Mode::Slalom => Mode::Track,
+        }
+    }
 }
 
 pub fn track_mode(mode: Res<Mode>, track: Res<TrackRes>) -> bool {
@@ -239,7 +251,7 @@ fn track_panel(mut contexts: EguiContexts, track: Res<TrackRes>, run: Res<TrackR
         if t.closure_gap > 1.0 && t.closure_heading_deg.abs() > 1.0 {
             ui.colored_label(egui::Color32::LIGHT_RED, format!("track doesn't close ({:.1} m)", t.closure_gap));
         }
-        ui.small("R restart · C parking challenge");
+        ui.small("R restart · C next mode");
     });
     Ok(())
 }

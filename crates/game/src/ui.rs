@@ -106,6 +106,13 @@ fn inspector(
                 .text(format!("grip demand {:.0}%", car.grip_demand * 100.0))
                 .fill(crate::render::to_egui(crate::render::zone_color(car.grip_demand, car.slide.is_some(), &tuning.vehicle)).gamma_multiply(0.7)),
         );
+        let st = &tuning.stability;
+        let (zone, color) = match car.stability {
+            s if s >= st.yellow => ("calm", egui::Color32::from_rgb(60, 160, 60)),
+            s if s > 0.0 => ("risky: rolls for loss of control", egui::Color32::from_rgb(190, 160, 0)),
+            _ => ("LOSS OF CONTROL", egui::Color32::from_rgb(190, 50, 50)),
+        };
+        ui.add(egui::ProgressBar::new(car.stability).text(format!("stability {:.0}% — {zone}", car.stability * 100.0)).fill(color));
 
         ui.separator();
         egui::CollapsingHeader::new("Events").default_open(false).show(ui, |ui| {
@@ -114,6 +121,10 @@ fn inspector(
                     SimEvent::SlideStarted { tick, speed, .. } => format!("{tick:>6}  slide start @ {:.0} km/h", kmh(*speed)),
                     SimEvent::SlideEnded { tick, duration, .. } => format!("{tick:>6}  slide end after {duration:.2} s"),
                     SimEvent::SegmentCompleted { tick, remaining, .. } => format!("{tick:>6}  segment done, {remaining} left"),
+                    SimEvent::Risk { tick, chance, .. } => format!("{tick:>6}  risk check {:.0}%", chance * 100.0),
+                    SimEvent::LossOfControl { tick, kind, speed, .. } => {
+                        format!("{tick:>6}  LOST CONTROL: {kind:?} @ {:.0} km/h", kmh(*speed))
+                    }
                 });
             }
         });
@@ -122,7 +133,8 @@ fn inspector(
             ui.label("LMB ground  add keypoint (drag to place)");
             ui.label("LMB ghost   drag: further = later, sideways = turn");
             ui.label("Wheel       throttle ±5% (dragged/hovered/selected)");
-            ui.label("T turn mode · S straight at current speed");
+            ui.label("T turn mode: steering / g-force / swerve");
+            ui.label("S straight at current speed · Z danger zones · X drift fans");
             ui.label("RMB ghost / Del  delete · Esc revert");
             ui.label(".           single tick");
             ui.label("Ctrl+Wheel / MMB zoom / pan · F follow car");

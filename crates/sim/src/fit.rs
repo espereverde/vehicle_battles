@@ -9,7 +9,7 @@ use std::f32::consts::TAU;
 
 use glam::Vec2;
 
-use crate::orders::{Drive, OrderQueue, Turn, TurnMode};
+use crate::orders::{Drive, OrderQueue, Segment, Turn, TurnMode};
 use crate::preview::CarFrame;
 use crate::state::{Car, CarId, DriveMode, SimState};
 use crate::tuning::Tuning;
@@ -30,6 +30,11 @@ impl Fit {
         self.miss.total_cmp(&other.miss)
     }
 }
+
+/// Where a keypoint can be dragged: rows of candidate turns, each a run of reachable
+/// points (`None` where a candidate isn't valid) with the worst grip zone on the way there
+/// (`stability::zone`). Neighboring rows and columns are neighbors on the ground.
+pub type ReachMap = Vec<Vec<Option<(Vec2, usize)>>>;
 
 /// Coarse samples across the turn range before refining.
 const COARSE: usize = 61;
@@ -92,9 +97,10 @@ pub fn fit_segment(
 }
 
 /// Every place the drag tool can put the keypoint: for `n` turn values spread over the
-/// same range `fit_segment` searches, the car's frame after each tick of the segment
-/// (`sweep[i][t - 1]` is turn `i` after `t` ticks; turns run from hard right to hard left).
-/// Same limits as the fit: unlimited grip, `max_ticks`, first loop only.
+/// same range `fit_segment` searches, the car's position after each tick of the segment
+/// and the worst grip zone along the way (`stability::zone`); `sweep[i][t - 1]` is turn
+/// `i` after `t` ticks, turns run from hard right to hard left. Same limits as the fit:
+/// unlimited grip, `max_ticks`, first loop only.
 #[allow(clippy::too_many_arguments)]
 pub fn sweep(
     state: &SimState,
@@ -106,21 +112,25 @@ pub fn sweep(
     max_ticks: u32,
     turned: f32,
     n: usize,
-) -> Vec<Vec<CarFrame>> {
+) -> ReachMap {
     turn_samples(state, tuning, car, mode, n)
         .into_iter()
         .map(|value| {
-            let mut frames = Vec::new();
+            let mut points = Vec::new();
+            let mut worst = 0;
             let drive = Drive { turn: Turn::new(mode, value), throttle };
-            run_candidate(state, world, tuning, car, drive, max_ticks, turned, |_, c| frames.push(CarFrame::of(c)));
-            frames
+            run_candidate(state, world, tuning, car, drive, max_ticks, turned, |_, c| {
+                worst = worst.max(CarFrame::of(c).zone(tuning));
+                points.push(Some((c.pose.pos, worst)));
+            });
+            points
         })
         .collect()
 }
 
 /// `n` turn values (at least 2) from hard right to hard left. Turns go up to
-/// `max_lateral_g`; in steering mode that is the steering giving that much lateral g at the
-/// start speed. Grip-limited steering at speed is a small fraction of full lock, so
+/// `max_lateral_g`; in steering and turn-rate (swerve) mode that is the steering / yaw rate
+/// giving that much lateral g at the start speed. Grip-limited steering at speed is a small fraction of full lock, so
 /// steering samples are spaced cubically (dense near zero).
 fn turn_samples(state: &SimState, tuning: &Tuning, car: CarId, mode: TurnMode, n: usize) -> Vec<f32> {
     let n = n.max(2);
@@ -132,6 +142,7 @@ fn turn_samples(state: &SimState, tuning: &Tuning, car: CarId, mode: TurnMode, n
         .map(|u| match mode {
             TurnMode::Steer => u * u * u * max_steer,
             TurnMode::Lateral => u * max_g,
+            TurnMode::Swerve => u * max_g * tuning.vehicle.gravity / v0.max(1.0),
         })
         .collect()
 }
@@ -153,7 +164,8 @@ fn run_candidate(
     let mut s = state.clone();
     if let Some(c) = s.car_mut(car) {
         c.drive_mode = DriveMode::Orders;
-        c.orders = OrderQueue { segments: Vec::new(), tail: drive };
+        // As a segment (not the tail) so swerves turn instead of driving straight.
+        c.orders = OrderQueue { segments: vec![Segment::new(drive, max_ticks.saturating_add(1))], tail: drive };
     }
     let mut heading = s.car(car).map_or(0.0, |c| c.pose.heading);
     for t in 1..=max_ticks.max(1) {

@@ -161,3 +161,76 @@ Playtest (needs a human):
 - [ ] Do drift fans make slides feel fair without giving the outcome away? Too wide / too narrow?
 - [ ] Are the danger zones readable, and do players use them to pick keypoints?
 - [ ] Is the drag stable now? Do red/orange warnings make slides feel fair when they happen live?
+
+## M2 — Stability & loss of control
+
+Decisions (before building):
+- **Stability decides.** Past the friction circle the tires only understeer (no fixed
+  `slide_threshold` any more, removed with `slide_ref_speed`). Skids and spins come only from
+  the gauge (or the handbrake). So the gauge is the one thing to manage, and the preview can
+  give exact odds.
+- **Swerve only** of the named maneuvers. Bootlegger, T-stop and controlled skid need handbrake
+  and reverse in segments, and the slide-free preview would have to simulate intended slides.
+  Deferred until the slalom playtest has answered the gate questions.
+
+Built:
+- `sim::stability`: per tick, drain `k_drain · (demand − comfort)²` above comfort plus
+  `k_jerk · |Δdemand|`; recovery `k_rec · pilot.skill` below comfort; frozen while sliding.
+  Below `yellow` (0.6), every `risk_interval` (0.25 s) spent above comfort is a risk check with
+  chance `risk_max · (1 − s/yellow)²`; at 0 it is certain. No checks under `min_speed`
+  (10 m/s = 36 km/h: playtest 1 complained about sliding at 25 km/h). Loss of control = slide
+  state plus a yaw kick into the turn: skid below `skid_speed` (12 m/s), spin above
+  `spin_speed` (25 m/s), linear odds between; stability restarts at `after_loss` (0.3).
+  All constants in the new `stability` section of `tuning.ron`.
+- Dice: `Live` and `Preview` roll from the state's RNG, so the preview-vs-reality check stays
+  bitwise exact. `Ideal` (the player's preview) never rolls: it emits `SimEvent::Risk` with the
+  chance, and at a certain loss resets the gauge to `after_loss` as if the car had recovered.
+- `Preview::risks` merges consecutive checks into stretches (`1 − Π(1 − p)`, spin odds weighted
+  by chance). Shown as red rings / a red cross on the path, labels ("34% spin at 2.1 s",
+  "LOSS OF CONTROL (spin) at 3.1 s"), red bands on a new stability graph under the timeline
+  strip, and in the scrub readout. Also on the faint path while running.
+- Path red now means "may lose control here" (yellow stability, above comfort, fast enough),
+  for the path, the timeline strip, danger zones and drift fans (`CarFrame::at_risk`).
+- Stability bar under the car (tick = yellow line) and in the inspector; event log shows risk
+  checks and losses of control.
+- Swerve: first a 3-keypoint template (Q/E); replaced after feedback by a turn mode, see below.
+- Slalom mode (C cycles track → parking → slalom): `assets/maps/slalom.ron`, 10 gates 20 m
+  apart at ±5 m, 4 m wide, finish at 235 m, limit 20.5 s, +2 s per missed gate. Panel shows time,
+  gates, losses of control, pauses, best; the timeline predicts gate passes (G3 / G3✗) and the
+  finish time. Calibrated with a scripted pure-pursuit driver: comfortable driving (demand
+  ≤ 0.7) ~21.7 s, hard but green ~18.8 s, at 14.5 m/s the gauge drops to yellow, at 15 m/s it
+  loses control and misses gates.
+- Tests: `tests/stability.rs` (drain/recovery/skill, no checks when green or below comfort,
+  ideal reports without losing control, skid vs spin by speed, dice from the state, risk
+  stretches), vehicle tests updated (understeer until the gauge runs out), swerve, slalom gate
+  logic and file parsing. 44 tests.
+
+Playtest: "Slalom" — FUN GATE 1 (needs a human)
+- [ ] Do players push into yellow on purpose?
+- [ ] Do crashes feel fair (did the preview warn them)?
+- [ ] Is the pause → plan → watch rhythm enjoyable without any combat?
+- [ ] Is 20.5 s the right limit? Does the gauge drain/recover at a readable pace?
+- [ ] Is the swerve mode useful? Which other maneuvers are wanted first?
+
+### M2 rework — swerve as a turn mode
+
+Feedback: make swerve selectable like steering and g-force. A swerve always ends in the same
+orientation as the previous keypoint, and is two turns of equal but reversed turn rate and the
+same duration. (A first version fitted an arbitrary target heading with a speed-profile model
+and correction passes; judged overcomplicated and replaced.)
+- `Turn::Swerve(rate)` (`TurnMode::Swerve`): yaw rate `rate` for the first half of the segment,
+  `-rate` for the second; steering adapts to speed (`δ = atan(rate·L/v)`). As the queue's tail it
+  drives straight. `Drive::controls` now takes the segment's (elapsed, ticks).
+- `sim::fit_swerve`: in the start frame, a longer swerve goes further forward and a higher rate
+  further sideways, so two nested bisections on the real ideal-mode simulation: half-length for
+  the forward distance, rate (up to `max_lateral_g` at the start speed, ≤ 90° per half) for the
+  sideways offset. ~2–3 ms, misses ≤ 0.1 m (whole ticks), heading back within 2°.
+- T cycles steering → g-force → swerve; the segment editor shows the turn rate (°/s); the
+  duration field keeps the halves equal automatically.
+- Danger zones in swerve mode: `sim::sweep_swerve`, one simulation per (rate, half-length every
+  5 ticks), colored by the worst zone on the way (~10 ms, only when the plan before the keypoint
+  changes). `sim::sweep` returns the same `ReachMap`, so zones.rs just meshes it.
+- Removed: the 3-keypoint swerve template (`sim::swerve`, Q/E, buttons, `swerve_*` tuning).
+- Tests (`tests/swerve.rs`): reaches the target with the start heading (lane changes both ways,
+  slow car, standing start, braking, small offset at 25 m/s), equal and opposite halves, drag
+  never jumps, danger-zone map covers both sides and reaches red.

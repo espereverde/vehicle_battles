@@ -9,6 +9,7 @@ pub struct Tuning {
     /// Seconds simulated ahead for the player's own preview.
     pub preview_horizon: f32,
     pub vehicle: VehicleTuning,
+    pub stability: StabilityTuning,
     pub planner: PlannerTuning,
     pub keyboard: KeyboardTuning,
 }
@@ -29,6 +30,7 @@ impl Default for Tuning {
             tick_rate: 60,
             preview_horizon: 5.0,
             vehicle: VehicleTuning::default(),
+            stability: StabilityTuning::default(),
             planner: PlannerTuning::default(),
             keyboard: KeyboardTuning::default(),
         }
@@ -58,13 +60,8 @@ pub struct VehicleTuning {
     pub grip: f32,
     /// Grip demand up to which driving feels safe; between this and 1.0 is the yellow zone.
     pub comfort_demand: f32,
-    /// Grip demand (with grip) above which the car breaks into a slide. Between 1.0 and
-    /// this the car understeers instead.
-    pub slide_threshold: f32,
     /// Deceleration while understeering, in g per unit of demand over 1.0 (capped at 1.0).
     pub understeer_scrub: f32,
-    /// Below this speed (m/s) the slide threshold grows as `slide_ref_speed / speed`.
-    pub slide_ref_speed: f32,
     /// Kinetic friction while sliding (lower than `grip`).
     pub slide_grip: f32,
     /// Fraction of the kinematic yaw rate the steering can still command while sliding.
@@ -102,9 +99,7 @@ impl Default for VehicleTuning {
             gravity: 9.81,
             grip: 1.5,
             comfort_demand: 0.7,
-            slide_threshold: 1.2,
             understeer_scrub: 0.3,
-            slide_ref_speed: 15.0,
             slide_grip: 0.75,
             slide_steer_authority: 0.35,
             slide_yaw_tau: 0.5,
@@ -115,6 +110,56 @@ impl Default for VehicleTuning {
             handbrake_grip: 0.6,
             handbrake_yaw_gain: 1.8,
             handbrake_min_speed: 3.0,
+        }
+    }
+}
+
+/// Stability gauge and loss of control (see `stability.rs`). Stability runs from 1 (calm)
+/// to 0; demand is the car's grip demand and comfort is `VehicleTuning::comfort_demand`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StabilityTuning {
+    /// Drain per second: `k_drain · (demand − comfort)²` while above comfort.
+    pub k_drain: f32,
+    /// Drain per unit of grip demand change: harsh transitions (swerves) cost stability.
+    pub k_jerk: f32,
+    /// Recovery per second at skill 1.0 (`k_rec · skill`) while below comfort.
+    pub k_rec: f32,
+    /// Below this stability the car is in the yellow zone: risk checks roll for a loss of
+    /// control. At 0 the loss of control is certain.
+    pub yellow: f32,
+    /// Seconds between risk checks while in the yellow zone and above comfort.
+    pub risk_interval: f32,
+    /// Chance per check at stability → 0; it grows as `risk_max · (1 − s / yellow)²`.
+    pub risk_max: f32,
+    /// No loss of control below this speed (m/s): a slow car just understeers.
+    pub min_speed: f32,
+    /// Spin vs skid: below `skid_speed` a loss of control is always a skid, above
+    /// `spin_speed` always a spin, linear in between.
+    pub skid_speed: f32,
+    pub spin_speed: f32,
+    /// Yaw rate kick (rad/s, into the turn) when the rear lets go.
+    pub skid_yaw_kick: f32,
+    pub spin_yaw_kick: f32,
+    /// Stability right after a loss of control (frozen while sliding).
+    pub after_loss: f32,
+}
+
+impl Default for StabilityTuning {
+    fn default() -> Self {
+        Self {
+            k_drain: 3.0,
+            k_jerk: 0.05,
+            k_rec: 0.3,
+            yellow: 0.6,
+            risk_interval: 0.25,
+            risk_max: 0.35,
+            min_speed: 10.0,
+            skid_speed: 12.0,
+            spin_speed: 25.0,
+            skid_yaw_kick: 1.0,
+            spin_yaw_kick: 5.0,
+            after_loss: 0.3,
         }
     }
 }

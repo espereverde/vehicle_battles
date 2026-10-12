@@ -82,8 +82,11 @@ pub struct Car {
     /// Actual front wheel angle in radians (rate-limited towards `controls.steer`).
     pub steer_angle: f32,
     pub slide: Option<SlideState>,
-    /// Placeholder until M2.
+    /// 1 = calm, 0 = certain loss of control (`stability.rs`).
     pub stability: f32,
+    /// Seconds at risk since the last risk check.
+    #[serde(default)]
+    pub risk_timer: f32,
     pub controls: Controls,
     pub drive_mode: DriveMode,
     pub orders: OrderQueue,
@@ -104,6 +107,7 @@ impl Car {
             steer_angle: 0.0,
             slide: None,
             stability: 1.0,
+            risk_timer: 0.0,
             controls: Controls::default(),
             drive_mode: DriveMode::default(),
             orders: OrderQueue::default(),

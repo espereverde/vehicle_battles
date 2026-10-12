@@ -7,6 +7,7 @@ mod manual;
 mod planning;
 mod render;
 mod replay;
+mod slalom;
 mod timeline;
 mod track;
 mod tuning_file;
@@ -60,7 +61,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Vehicle Battles — M1 (keypoints)".into(),
+                title: "Vehicle Battles — M2 (stability)".into(),
                 ..default()
             }),
             ..default()
@@ -83,6 +84,7 @@ fn main() {
             replay::ReplayPlugin,
             ui::UiPlugin,
             zones::ZonesPlugin,
+            slalom::SlalomPlugin,
         ))
         .add_systems(Update, (hotkeys.run_if(not(egui_wants_any_keyboard_input)), tuning_file::hot_reload))
         .add_systems(FixedUpdate, fixed_tick.run_if(in_state(AppState::Running)))
@@ -104,11 +106,7 @@ fn hotkeys(
     }
     let switch_mode = keys.just_pressed(KeyCode::KeyC);
     if switch_mode {
-        let mode = &mut *stepper.mode;
-        *mode = match *mode {
-            track::Mode::Track => track::Mode::Parking,
-            track::Mode::Parking => track::Mode::Track,
-        };
+        *stepper.mode = stepper.mode.next();
     }
     let restart = keys.just_pressed(KeyCode::KeyR) || switch_mode;
     let new_course = keys.just_pressed(KeyCode::KeyN) && *stepper.mode == track::Mode::Parking;
@@ -146,6 +144,7 @@ pub struct Stepper<'w> {
     pub recorder: ResMut<'w, replay::Recorder>,
     pub check: ResMut<'w, planning::RealityCheck>,
     pub challenge: ResMut<'w, challenge::Challenge>,
+    slalom: ResMut<'w, slalom::Slalom>,
     track_run: ResMut<'w, track::TrackRun>,
     track: Res<'w, track::TrackRes>,
     pub mode: ResMut<'w, track::Mode>,
@@ -170,6 +169,10 @@ impl Stepper<'_> {
         }
         let sim = &mut *self.sim;
         let events = sim::step(&mut sim.state, &sim.world, &self.tuning, StepMode::Live);
+        let rate = self.tuning.tick_rate as f32;
+        if *self.mode == track::Mode::Slalom {
+            self.slalom.update(&sim.state, player, &events.events, rate);
+        }
         self.log.0.extend(events.events);
         let excess = self.log.0.len().saturating_sub(12);
         self.log.0.drain(..excess);
@@ -182,6 +185,7 @@ impl Stepper<'_> {
                     self.track_run.update(&sim.state, player, track);
                 }
             }
+            track::Mode::Slalom => {}
         }
     }
 
@@ -204,5 +208,6 @@ impl Stepper<'_> {
         self.check.stop();
         self.challenge.restart(new_course);
         self.track_run.restart();
+        self.slalom.restart();
     }
 }

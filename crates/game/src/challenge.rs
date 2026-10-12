@@ -174,7 +174,7 @@ fn challenge_panel(mut contexts: EguiContexts, challenge: Res<Challenge>, sim: R
         if let Some(best) = challenge.best {
             ui.label(format!("best: {:.1} s", best as f32 / rate));
         }
-        ui.small("R restart · N new course · C test track");
+        ui.small("R restart · N new course · C next mode");
     });
     Ok(())
 }

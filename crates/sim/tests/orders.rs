@@ -194,7 +194,7 @@ fn ideal_turns_are_limited_by_the_steering_lock() {
 
 /// The fit ignores grip: a turn far past the limit is fitted exactly on its ideal path
 /// (regression for the old model: every slide landed near a gentle turn, steering jumped
-/// from 9% to 100%). The real car then slides, which the real preview shows.
+/// from 9% to 100%). The real car then drains its stability and loses control.
 #[test]
 fn fit_assumes_unlimited_grip() {
     let tuning = Tuning::default();
@@ -214,7 +214,7 @@ fn fit_assumes_unlimited_grip() {
     let mut real = start.clone();
     real.cars[0].orders = OrderQueue { segments: Vec::new(), tail: hard };
     let events = run_ticks(&mut real, &tuning, 48);
-    assert!(events.iter().any(|e| matches!(e, SimEvent::SlideStarted { .. })));
+    assert!(events.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "{events:?}");
 
     // Sweeping the target sideways must increase steering monotonically, never jump.
     let mut last = 0.0;
@@ -231,12 +231,14 @@ fn live_execution_matches_the_preview_exactly() {
     let tuning = Tuning::default();
     let world = World::default();
     let mut s = car_at(5.0);
-    // Hard enough to include understeer and a slide.
+    // Hard enough to include understeer, risk checks (dice) and a loss of control.
     let q = queue(&[(drive(Turn::Steer(0.0), 1.0), 120), (drive(Turn::Lateral(1.8), 0.6), 90), (drive(Turn::Steer(-0.3), -0.5), 60)]);
     Command::SetOrders { car: s.cars[0].id, orders: q }.apply(&mut s);
 
     let preview = Preview::run(&s, &world, &tuning, tuning.preview_ticks());
-    assert!(preview.events.iter().any(|e| matches!(e, SimEvent::SlideStarted { .. })), "test should slide");
+    let events = &preview.events;
+    assert!(events.iter().any(|e| matches!(e, SimEvent::Risk { chance, .. } if *chance < 1.0)), "test should roll dice");
+    assert!(events.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "test should lose control");
     for _ in 0..preview.ticks() {
         sim::step(&mut s, &world, &tuning, StepMode::Live);
         assert_eq!(preview.check(&s), Check::Match, "diverged at tick {}", s.tick);
@@ -417,21 +419,24 @@ fn sweep_spans_the_fit_search_space() {
         assert_eq!(fan.len(), 41);
         assert!(fan.iter().all(|arc| !arc.is_empty() && arc.len() <= 180));
         // The hardest turns nearly close a loop, so look at how far they reach sideways.
-        let reach = |arc: &Vec<sim::CarFrame>| arc.iter().map(|f| f.pose.pos.y).fold(0.0f32, |m, y| if y.abs() > m.abs() { y } else { m });
+        let reach = |arc: &Vec<Option<(Vec2, usize)>>| arc.iter().flatten().map(|p| p.0.y).fold(0.0f32, |m, y| if y.abs() > m.abs() { y } else { m });
         assert!(reach(&fan[0]) < -5.0, "{mode:?}: first arc should turn right");
         assert!(reach(&fan[40]) > 5.0, "{mode:?}: last arc should turn left");
-        let straight = fan[20].last().unwrap().pose.pos;
+        let straight = fan[20].last().unwrap().unwrap().0;
+        // Zones only get worse along an arc; straight stays green, the hardest reaches red.
+        assert!(fan.iter().all(|arc| arc.windows(2).all(|w| w[0].unwrap().1 <= w[1].unwrap().1)));
+        assert!(fan[20].iter().all(|p| p.unwrap().1 == 0) && fan[0].last().unwrap().unwrap().1 == 3);
         assert!(straight.y.abs() < 1e-3, "{mode:?}: middle arc should be straight, ends at {straight}");
 
         let target = Vec2::new(25.0, 6.0);
         let fit = fit_segment(&start, &world, &tuning, id, mode, 0.2, target, 180, 0.0);
-        let nearest = fan.iter().flatten().map(|f| f.pose.pos.distance(target)).fold(f32::INFINITY, f32::min);
+        let nearest = fan.iter().flatten().flatten().map(|p| p.0.distance(target)).fold(f32::INFINITY, f32::min);
         assert!(fit.miss < 0.1 && nearest < 1.0, "{mode:?}: fit miss {} m, fan nearest {nearest} m", fit.miss);
     }
 }
 
 /// Drift bound: nothing on a turn within grip; past it, the bound runs outside the planned
-/// turn, wider for a slide than for understeer, and recovers after the turn.
+/// turn, wider where the car may lose control than for understeer, and recovers after.
 #[test]
 fn drift_bound_opens_outward_wider_when_sliding() {
     let tuning = Tuning::default();
@@ -443,7 +448,7 @@ fn drift_bound_opens_outward_wider_when_sliding() {
         let hold = hold_throttle(20.0, vt);
         s.cars[0].orders = queue(&[(drive(Turn::Lateral(g), hold), 60), (drive(Turn::Lateral(0.0), hold), 200)]);
         let preview = Preview::run_in(StepMode::Ideal, &s, &World::default(), &tuning, 150);
-        let drift = preview.drift(id, vt, tuning.dt(), 30);
+        let drift = preview.drift(id, &tuning, 30);
         let kinds: Vec<_> = drift.iter().flatten().map(|d| d.1).collect();
         // Widest gap between the plan and the bound (outward = to the right of a left turn).
         let widest = drift
@@ -459,7 +464,8 @@ fn drift_bound_opens_outward_wider_when_sliding() {
     let (kinds, widest, _) = spread(1.0);
     assert!(kinds.is_empty() && widest == 0.0, "within grip: {kinds:?}");
 
-    let (kinds, understeer, last) = spread(1.6);
+    // Just past the grip limit: stability drains, but stays out of yellow for the second.
+    let (kinds, understeer, last) = spread(1.55);
     assert!(kinds.contains(&Drift::Understeer) && !kinds.contains(&Drift::Slide), "{kinds:?}");
     assert!(kinds.contains(&Drift::Recover));
     assert!(last.unwrap() < 140, "bound should stop after recovering, ends at {last:?}");

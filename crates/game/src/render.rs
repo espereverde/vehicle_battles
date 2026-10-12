@@ -251,7 +251,25 @@ fn draw_cars(mut gizmos: Gizmos, sim: Res<Sim>, tuning: Res<TuningRes>) {
         // Velocity (where the car is going) vs. heading (where it points).
         gizmos.arrow_2d(car.pose.pos, car.pose.pos + car.vel * 0.5, css::SKY_BLUE);
         draw_grip_circle(&mut gizmos, car, vt);
+        draw_stability(&mut gizmos, car, &tuning);
     }
+}
+
+/// Stability gauge under the car: a bar that shrinks as stability drains, green above the
+/// yellow zone, yellow in it, red when empty; the tick marks the yellow-zone threshold.
+fn draw_stability(gizmos: &mut Gizmos, car: &Car, tuning: &sim::Tuning) {
+    const W: f32 = 4.0;
+    let st = &tuning.stability;
+    let left = car.pose.pos - Vec2::new(W * 0.5, tuning.vehicle.length + 0.5);
+    let color = match car.stability {
+        s if s >= st.yellow => css::LIME,
+        s if s > 0.0 => css::YELLOW,
+        _ => css::RED,
+    };
+    gizmos.line_2d(left, left + Vec2::X * W, css::DIM_GRAY);
+    gizmos.line_2d(left, left + Vec2::X * (W * car.stability).max(0.05), color);
+    let mark = left + Vec2::X * W * st.yellow;
+    gizmos.line_2d(mark - Vec2::Y * 0.3, mark + Vec2::Y * 0.3, css::GRAY);
 }
 
 /// Friction circle next to the car: the dot is the delivered acceleration, the ring is the

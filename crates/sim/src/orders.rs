@@ -14,6 +14,10 @@ pub enum TurnMode {
     Steer,
     /// Constant lateral acceleration: steering adapts to speed.
     Lateral,
+    /// Two chained curves of equal and opposite turn rate and equal duration (an S-curve
+    /// that ends pointing the way it started): steering adapts to speed so the yaw rate stays
+    /// constant, and flips sign halfway through the segment.
+    Swerve,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -22,6 +26,9 @@ pub enum Turn {
     Steer(f32),
     /// Lateral acceleration in g, positive = left.
     Lateral(f32),
+    /// Yaw rate (rad/s, positive = left) for the first half of the segment, then the
+    /// opposite. After the segment (as the queue's tail) it drives straight.
+    Swerve(f32),
 }
 
 impl Turn {
@@ -29,6 +36,7 @@ impl Turn {
         match mode {
             TurnMode::Steer => Turn::Steer(value),
             TurnMode::Lateral => Turn::Lateral(value),
+            TurnMode::Swerve => Turn::Swerve(value),
         }
     }
 
@@ -36,37 +44,60 @@ impl Turn {
         match self {
             Turn::Steer(_) => TurnMode::Steer,
             Turn::Lateral(_) => TurnMode::Lateral,
+            Turn::Swerve(_) => TurnMode::Swerve,
         }
     }
 
     pub fn value(&self) -> f32 {
         match *self {
-            Turn::Steer(v) | Turn::Lateral(v) => v,
+            Turn::Steer(v) | Turn::Lateral(v) | Turn::Swerve(v) => v,
         }
     }
 
-    /// Steering command at forward speed `v`.
+    /// Steering command at forward speed `v`; `phase` is (ticks elapsed, total ticks) of
+    /// its segment, `None` once the segment is over and the turn is the queue's tail.
+    pub fn steer_at(&self, v: f32, vt: &VehicleTuning, phase: Option<(u32, u32)>) -> f32 {
+        let max = vt.max_steer_deg.to_radians();
+        match *self {
+            Turn::Swerve(rate) => {
+                let rate = match phase {
+                    Some((elapsed, ticks)) if 2 * elapsed < ticks => rate,
+                    Some(_) => -rate,
+                    None => 0.0,
+                };
+                // Kinematic bicycle: yaw rate = v · tan δ / L.
+                let delta = (rate * vt.wheelbase / v.max(1e-3)).atan().clamp(-max, max);
+                delta / max
+            }
+            _ => self.steer(v, vt),
+        }
+    }
+
+    /// Steering command at forward speed `v` (a swerve: its first curve).
     pub fn steer(&self, v: f32, vt: &VehicleTuning) -> f32 {
+        let max = vt.max_steer_deg.to_radians();
         match *self {
             Turn::Steer(s) => s.clamp(-1.0, 1.0),
             Turn::Lateral(g) => {
                 // Kinematic bicycle: a_lat = v² · tan δ / L.
-                let max = vt.max_steer_deg.to_radians();
                 let delta = (g * vt.gravity * vt.wheelbase / (v * v).max(1e-3)).atan().clamp(-max, max);
                 delta / max
             }
+            Turn::Swerve(_) => self.steer_at(v, vt, Some((0, 1))),
         }
     }
 
-    /// The same turn expressed in `mode`, steering identically at speed `v`.
+    /// The same turn expressed in `mode`, steering identically at speed `v` (a swerve:
+    /// its first curve).
     pub fn convert(&self, mode: TurnMode, v: f32, vt: &VehicleTuning) -> Turn {
-        match (*self, mode) {
-            (Turn::Steer(s), TurnMode::Lateral) => {
-                let delta = s.clamp(-1.0, 1.0) * vt.max_steer_deg.to_radians();
-                Turn::Lateral(v * v * delta.tan() / vt.wheelbase / vt.gravity)
-            }
-            (Turn::Lateral(_), TurnMode::Steer) => Turn::Steer(self.steer(v, vt)),
-            _ => *self,
+        if self.mode() == mode {
+            return *self;
+        }
+        let delta = self.steer(v, vt) * vt.max_steer_deg.to_radians();
+        match mode {
+            TurnMode::Steer => Turn::Steer(self.steer(v, vt)),
+            TurnMode::Lateral => Turn::Lateral(v * v * delta.tan() / vt.wheelbase / vt.gravity),
+            TurnMode::Swerve => Turn::Swerve(v * delta.tan() / vt.wheelbase),
         }
     }
 }
@@ -87,9 +118,10 @@ impl Drive {
         Drive { turn: Turn::new(mode, 0.0), throttle: hold_throttle(v, vt) }
     }
 
-    pub fn controls(&self, v: f32, vt: &VehicleTuning) -> Controls {
+    /// Controls at forward speed `v`; `phase` as in `Turn::steer_at`.
+    pub fn controls(&self, v: f32, vt: &VehicleTuning, phase: Option<(u32, u32)>) -> Controls {
         let t = self.throttle.clamp(-1.0, 1.0);
-        Controls { steer: self.turn.steer(v, vt), throttle: t.max(0.0), brake: (-t).max(0.0), handbrake: false }
+        Controls { steer: self.turn.steer_at(v, vt, phase), throttle: t.max(0.0), brake: (-t).max(0.0), handbrake: false }
     }
 }
 

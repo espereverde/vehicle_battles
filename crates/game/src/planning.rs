@@ -12,7 +12,9 @@
 //! Mouse: LMB on the ground adds a keypoint there (drag to place it); drag a keypoint ghost
 //! to refit its segment (further = later, sideways = more turn); the wheel changes the
 //! throttle of the dragged / hovered / selected keypoint; RMB on a ghost deletes it.
-//! Keys: T turn mode, S straight, Del delete, Esc revert, `.` single tick.
+//! Keys: T turn mode (steering → g-force → swerve), S straight, Del delete, Esc revert,
+//! `.` single tick. A swerve is two curves of equal and opposite turn rate and equal
+//! duration: it ends at the cursor pointing the way the car started.
 
 use bevy::color::palettes::css;
 use bevy::input::mouse::AccumulatedMouseScroll;
@@ -20,9 +22,10 @@ use bevy::prelude::*;
 use bevy_egui::input::{egui_wants_any_keyboard_input, egui_wants_any_pointer_input};
 use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use sim::preview::Check;
-use sim::{CarFrame, Command, Drive, DriveMode, OrderQueue, Preview, Segment, SimState, StepMode, Turn, TurnMode, fit_segment};
+use sim::{CarFrame, Command, Drive, DriveMode, OrderQueue, Preview, RiskStretch, Segment, SimState, StepMode, Turn, TurnMode, fit_segment, fit_swerve};
 
 use crate::challenge::Challenge;
+use crate::slalom::Slalom;
 use crate::track::{Mode, TrackRes};
 use crate::ui::kmh;
 use crate::render::{self, WorldView, car_outline, zone_color};
@@ -56,6 +59,9 @@ impl Plugin for PlanningPlugin {
             .add_systems(EguiPrimaryContextPass, plan_labels.run_if(in_state(AppState::Paused)));
     }
 }
+
+/// Half-length step (ticks) of the swerve danger-zone map: each point is a simulation.
+const SWERVE_SWEEP_STEP: u32 = 5;
 
 /// Editing the draft and rebuilding its preview (while paused).
 #[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
@@ -163,17 +169,11 @@ impl Draft {
     fn refit(&mut self, k: usize, target: Vec2, sim: &Sim, tuning: &TuningRes) {
         let Some((state, turned)) = self.start_state(k, sim, tuning) else { return };
         let seg = self.orders.segments[k];
-        let fit = fit_segment(
-            &state,
-            &sim.world,
-            tuning,
-            sim.player,
-            seg.drive.turn.mode(),
-            seg.drive.throttle,
-            target,
-            self.max_ticks(k, tuning) - seg.elapsed,
-            turned,
-        );
+        let (mode, throttle, max_ticks) = (seg.drive.turn.mode(), seg.drive.throttle, self.max_ticks(k, tuning) - seg.elapsed);
+        let fit = match mode {
+            TurnMode::Swerve => fit_swerve(&state, &sim.world, tuning, sim.player, throttle, target, max_ticks),
+            _ => fit_segment(&state, &sim.world, tuning, sim.player, mode, throttle, target, max_ticks, turned),
+        };
         if fit.turn != seg.drive.turn {
             self.orders.segments[k].drive.turn = fit.turn;
             self.changed();
@@ -203,9 +203,10 @@ impl Draft {
     }
 
     /// Every place keypoint `k` (or a new one, when `k` is past the last) can be dragged to,
-    /// keeping its throttle and turn mode: `n` turn values, each with its frame per tick
-    /// (see `sim::sweep`). `None` if it starts beyond the preview or after the first loop.
-    pub fn sweep(&self, k: usize, sim: &Sim, tuning: &TuningRes, n: usize) -> Option<Vec<Vec<CarFrame>>> {
+    /// keeping its throttle and turn mode, with the worst grip zone on the way (see
+    /// `sim::sweep`, `sim::sweep_swerve`). `None` if it starts beyond the preview or after
+    /// the first loop.
+    pub fn sweep(&self, k: usize, sim: &Sim, tuning: &TuningRes, n: usize) -> Option<sim::ReachMap> {
         let (state, turned) = self.start_state(k, sim, tuning)?;
         let (mode, throttle, max_ticks) = match self.orders.segments.get(k) {
             Some(seg) => (seg.drive.turn.mode(), seg.drive.throttle, self.max_ticks(k, tuning) - seg.elapsed),
@@ -215,7 +216,10 @@ impl Draft {
                 (self.mode, self.new_throttle(v0, tuning), room)
             }
         };
-        Some(sim::sweep(&state, &sim.world, tuning, sim.player, mode, throttle, max_ticks, turned, n))
+        Some(match mode {
+            TurnMode::Swerve => sim::sweep_swerve(&state, &sim.world, tuning, sim.player, throttle, max_ticks, n / 3, SWERVE_SWEEP_STEP),
+            _ => sim::sweep(&state, &sim.world, tuning, sim.player, mode, throttle, max_ticks, turned, n),
+        })
     }
 
     /// Appends a keypoint aimed at `target`. Returns its index, or `None` when the existing
@@ -253,7 +257,7 @@ impl Draft {
     }
 
     /// Switches to `mode`. A selected segment is converted and refitted so its keypoint
-    /// stays where it is.
+    /// stays where it is (a swerve ends pointing the way it started, so its keypoint turns).
     pub fn set_mode(&mut self, mode: TurnMode, sim: &Sim, tuning: &TuningRes, keypoint: Option<Vec2>) {
         self.mode = mode;
         let Some(k) = self.selected else { return };
@@ -314,6 +318,12 @@ pub struct PlanPreview {
     pub hits: Vec<(usize, usize)>,
     /// Preview ticks where the car leaves the track (track mode).
     pub off_track: Vec<usize>,
+    /// Where the player's car may lose control (`Preview::risks`).
+    pub risks: Vec<RiskStretch>,
+    /// Slalom gates the preview crosses: (gate index, preview tick, inside the gate).
+    pub gates: Vec<(usize, usize, bool)>,
+    /// Slalom finish within the preview: (preview tick, result with penalties in s).
+    pub finish: Option<(usize, f32)>,
     /// While dragging a keypoint, the scrub follows its end.
     follow: Option<usize>,
 }
@@ -328,10 +338,17 @@ impl PlanPreview {
         self.player_frame(*self.ends.get(k)?)
     }
 
-    /// The real car would slide in preview frame `f`: its grip demand is past the point
-    /// where a slide starts (the preview itself never slides).
-    pub fn would_slide(f: &CarFrame, vt: &sim::VehicleTuning) -> bool {
-        f.grip_demand > sim::vehicle::slide_threshold(f.vel.length(), vt)
+    /// Label for a risk stretch: "34% spin at 2.1 s", or "LOSS OF CONTROL" when certain.
+    pub fn risk_label(r: &RiskStretch, rate: f32) -> String {
+        let kind = match r.spin_chance {
+            p if p >= 0.75 => "spin",
+            p if p <= 0.25 => "skid",
+            _ => "skid/spin",
+        };
+        match r.certain_at {
+            Some(i) => format!("LOSS OF CONTROL ({kind}) at {:.1} s", i as f32 / rate),
+            None => format!("{:.0}% {kind} at {:.1} s", r.chance * 100.0, r.start as f32 / rate),
+        }
     }
 }
 
@@ -452,7 +469,8 @@ fn edit_keys(keys: Res<ButtonInput<KeyCode>>, mut draft: ResMut<Draft>, plan: Re
     if keys.just_pressed(KeyCode::KeyT) {
         let mode = match draft.shown_mode() {
             TurnMode::Steer => TurnMode::Lateral,
-            TurnMode::Lateral => TurnMode::Steer,
+            TurnMode::Lateral => TurnMode::Swerve,
+            TurnMode::Swerve => TurnMode::Steer,
         };
         let keypoint = draft.selected.and_then(|k| plan.keypoint(k)).map(|f| f.pose.pos);
         draft.set_mode(mode, &stepper.sim, &stepper.tuning, keypoint);
@@ -492,7 +510,9 @@ fn sync_draft(mut draft: ResMut<Draft>, sim: Res<Sim>) {
     draft.follow(&sim.player_car().orders);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rebuild_preview(
+    slalom: Res<Slalom>,
     mut draft: ResMut<Draft>,
     sim: Res<Sim>,
     tuning: Res<TuningRes>,
@@ -501,14 +521,19 @@ fn rebuild_preview(
     track: Res<TrackRes>,
     mut plan: ResMut<PlanPreview>,
 ) {
-    if draft.dirty || tuning.is_changed() || challenge.is_changed() || mode.is_changed() {
+    if draft.dirty || tuning.is_changed() || challenge.is_changed() || mode.is_changed() || slalom.is_changed() {
         draft.dirty = false;
         let state = draft_state(&sim, &draft.orders);
         let preview = ideal_preview(&state, &sim, &tuning);
         plan.ends = draft.orders.end_ticks().into_iter().map(|t| t as usize).collect();
         plan.hits.clear();
         plan.off_track.clear();
+        plan.gates.clear();
+        plan.finish = None;
         let track = track.track.as_ref().filter(|_| *mode == Mode::Track);
+        // Slalom: carry on the live run's gate count over the preview.
+        let spec = slalom.spec.as_ref().filter(|_| *mode == Mode::Slalom);
+        let mut course = slalom.course.clone();
         let mut next = challenge.next;
         let mut was_on = true;
         for i in 0..=preview.ticks() {
@@ -516,6 +541,13 @@ fn rebuild_preview(
             if *mode == Mode::Parking && challenge.targets.get(next).is_some_and(|t| t.satisfied(f.pose, f.vel.length())) {
                 plan.hits.push((next, i));
                 next += 1;
+            }
+            if let Some(spec) = spec {
+                let tick = preview.start_tick + i as u64;
+                plan.gates.extend(course.update(spec, f.pose, tick).iter().map(|p| (p.gate, i, p.ok)));
+                if course.finish == Some(tick) {
+                    plan.finish = course.result(spec, tuning.tick_rate as f32).map(|r| (i, r));
+                }
             }
             if let Some(track) = track {
                 let on = track.on_track(f.pose.pos);
@@ -526,6 +558,7 @@ fn rebuild_preview(
             }
         }
         plan.scrub = plan.scrub.min(preview.ticks());
+        plan.risks = preview.risks(sim.player, &tuning);
         plan.preview = Some(preview);
     }
     if let Some(&end) = plan.follow.and_then(|k| plan.ends.get(k)) {
@@ -543,7 +576,9 @@ fn follow_live(sim: Res<Sim>, tuning: Res<TuningRes>, mut plan: ResMut<PlanPrevi
     if plan.preview.as_ref().is_some_and(|p| p.start_tick == sim.state.tick) {
         return;
     }
-    plan.preview = Some(ideal_preview(&sim.state, &sim, &tuning));
+    let preview = ideal_preview(&sim.state, &sim, &tuning);
+    plan.risks = preview.risks(sim.player, &tuning);
+    plan.preview = Some(preview);
 }
 
 /// The player's preview without slides, cut where the path closes its first loop (after
@@ -574,6 +609,7 @@ fn draw_plan(
         if let Some(preview) = &plan.preview {
             let frames = player_frames(preview, &sim);
             gizmos.linestrip_2d(frames.iter().map(|f| f.pose.pos), css::WHITE.with_alpha(0.15));
+            draw_risks(&mut gizmos, &plan, &frames, 0.5);
         }
         return;
     }
@@ -581,7 +617,7 @@ fn draw_plan(
     let Some(preview) = &plan.preview else { return };
     let frames = player_frames(preview, &sim);
     for w in frames.windows(2) {
-        gizmos.line_2d(w[0].pose.pos, w[1].pose.pos, zone_color(w[1].grip_demand, PlanPreview::would_slide(w[1], vt), vt));
+        gizmos.line_2d(w[0].pose.pos, w[1].pose.pos, zone_color(w[1].grip_demand, w[1].at_risk(&tuning), vt));
     }
     for f in frames.iter().step_by(tuning.tick_rate as usize).skip(1) {
         car_outline(&mut gizmos, f.pose, vt, css::WHITE.with_alpha(0.12));
@@ -598,9 +634,33 @@ fn draw_plan(
             gizmos.circle_2d(Isometry2d::from_translation(f.pose.pos), 2.0, css::MAGENTA);
         }
     }
+    draw_risks(&mut gizmos, &plan, &frames, 1.0);
     if let Some(f) = frames.get(plan.scrub) {
         car_outline(&mut gizmos, f.pose, vt, css::YELLOW);
         gizmos.arrow_2d(f.pose.pos, f.pose.pos + f.vel * 0.5, css::YELLOW.with_alpha(0.7));
+    }
+}
+
+/// Risk markers on the path: a red ring where a stretch starts (larger for higher chance),
+/// a red cross at a certain loss of control.
+fn draw_risks(gizmos: &mut Gizmos, plan: &PlanPreview, frames: &[&CarFrame], alpha: f32) {
+    let red = css::RED.with_alpha(alpha);
+    for r in &plan.risks {
+        let Some(f) = frames.get(r.at()) else { continue };
+        let p = f.pose.pos;
+        if r.certain_at.is_some() {
+            gizmos.circle_2d(Isometry2d::from_translation(p), 2.5, red);
+            let d = Vec2::splat(1.6);
+            gizmos.line_2d(p - d, p + d, red);
+            gizmos.line_2d(p + Vec2::new(-d.x, d.y), p + Vec2::new(d.x, -d.y), red);
+        } else {
+            gizmos.circle_2d(Isometry2d::from_translation(p), 1.0 + 2.0 * r.chance, red);
+        }
+        // The rest of the stretch, as a thin red trace beside the path.
+        for w in frames.get(r.start..=r.end.min(frames.len() - 1)).unwrap_or(&[]).windows(2) {
+            let off = w[0].pose.left() * 1.2;
+            gizmos.line_2d(w[0].pose.pos + off, w[1].pose.pos + off, red.with_alpha(alpha * 0.6));
+        }
     }
 }
 
@@ -609,6 +669,7 @@ pub fn describe(drive: &Drive) -> String {
     let turn = match drive.turn {
         Turn::Steer(s) => format!("steer {:+.0}%", s * 100.0),
         Turn::Lateral(g) => format!("{g:+.2} g"),
+        Turn::Swerve(rate) => format!("swerve {:+.0}°/s", rate.to_degrees()),
     };
     format!("thr {:+.0}%  {turn}", drive.throttle * 100.0)
 }
@@ -652,6 +713,13 @@ fn plan_labels(
         if let Some(p) = view.to_screen(f.pose.pos + below * 2.0) {
             let text = format!("T{} reached at {:.1} s", target + 1, tick as f32 / rate);
             painter.text(p, egui::Align2::CENTER_BOTTOM, text, font.clone(), egui::Color32::LIGHT_GREEN);
+        }
+    }
+    for r in &plan.risks {
+        let Some(f) = plan.player_frame(r.at()) else { continue };
+        if let Some(p) = view.to_screen(f.pose.pos + Vec2::new(3.0, 0.0)) {
+            let red = egui::Color32::from_rgb(255, 80, 80);
+            painter.text(p, egui::Align2::LEFT_CENTER, PlanPreview::risk_label(r, rate), font.clone(), red);
         }
     }
     Ok(())

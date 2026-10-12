@@ -17,7 +17,7 @@ use bevy_egui::input::egui_wants_any_keyboard_input;
 use sim::{Drift, Segment, TurnMode};
 
 use crate::planning::{Draft, PlanEdit, PlanPreview};
-use crate::render::{ZONE_COLORS, zone};
+use crate::render::ZONE_COLORS;
 use crate::{AppState, Sim, TuningRes};
 
 /// Turn values sampled across the fit's range.
@@ -103,7 +103,7 @@ fn update_drift(
         return;
     }
     let recover = (tuning.planner.drift_recover_seconds * tuning.tick_rate as f32).round() as usize;
-    let drift = preview.drift(sim.player, &tuning.vehicle, tuning.dt(), recover);
+    let drift = preview.drift(sim.player, &tuning, recover);
 
     // Per tick: the planned point and the outer bound, colored by why it drifts (recovery
     // keeps the color of the drift before it); quads between consecutive ticks.
@@ -156,31 +156,31 @@ fn update(
     if zones.built_for.as_ref() == Some(&key) && !tuning.is_changed() {
         return;
     }
-    let fan = draft.sweep(keypoint, &sim, &tuning, TURNS).unwrap_or_default();
+    let grid = draft.sweep(keypoint, &sim, &tuning, TURNS).unwrap_or_default();
 
-    // Worst zone along each candidate segment so far: the color its path would have if
-    // the keypoint ended there.
-    let vt = &tuning.vehicle;
+    // One vertex per reachable point, colored by the worst zone on the way there; quads
+    // between neighboring rows (turn values) at neighboring columns where all four exist.
     let mut positions = Vec::new();
     let mut colors = Vec::new();
-    let mut rows = Vec::with_capacity(fan.len());
-    for frames in &fan {
-        let first = positions.len() as u32;
-        let mut worst = 0;
-        for f in frames {
-            worst = worst.max(zone(f.grip_demand, PlanPreview::would_slide(f, vt), vt));
-            positions.push(f.pose.pos.extend(Z).to_array());
-            colors.push(LinearRgba::from(ZONE_COLORS[worst].with_alpha(ALPHA)).to_f32_array());
-        }
-        rows.push((first, frames.len() as u32));
-    }
-    // Quads between neighboring turns at consecutive ticks, where both have them.
+    let vertex: Vec<Vec<Option<u32>>> = grid
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|p| {
+                    let &(pos, zone) = p.as_ref()?;
+                    positions.push(pos.extend(Z).to_array());
+                    colors.push(LinearRgba::from(ZONE_COLORS[zone].with_alpha(ALPHA)).to_f32_array());
+                    Some(positions.len() as u32 - 1)
+                })
+                .collect()
+        })
+        .collect();
     let mut indices = Vec::new();
-    for pair in rows.windows(2) {
-        let ((a, na), (b, nb)) = (pair[0], pair[1]);
-        for t in 0..na.min(nb).saturating_sub(1) {
-            let (a0, a1, b0, b1) = (a + t, a + t + 1, b + t, b + t + 1);
-            indices.extend_from_slice(&[a0, b0, b1, a0, b1, a1]);
+    for rows in vertex.windows(2) {
+        for t in 0..rows[0].len().min(rows[1].len()).saturating_sub(1) {
+            if let (Some(a0), Some(a1), Some(b0), Some(b1)) = (rows[0][t], rows[0][t + 1], rows[1][t], rows[1][t + 1]) {
+                indices.extend_from_slice(&[a0, b0, b1, a0, b1, a1]);
+            }
         }
     }
     show(&mut meshes, &handle.0, visibility, positions, colors, indices);
