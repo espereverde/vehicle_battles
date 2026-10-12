@@ -132,11 +132,14 @@ pub struct PlannerTuning {
     pub max_lateral_g: f32,
     /// Length of a keypoint added with the "straight" button (s).
     pub straight_seconds: f32,
+    /// Drift fans: how long (s) the outer bound keeps its offset after the plan is back
+    /// within grip.
+    pub drift_recover_seconds: f32,
 }
 
 impl Default for PlannerTuning {
     fn default() -> Self {
-        Self { default_throttle: 0.4, throttle_step: 0.05, max_lateral_g: 3.0, straight_seconds: 1.0 }
+        Self { default_throttle: 0.4, throttle_step: 0.05, max_lateral_g: 3.0, straight_seconds: 1.0, drift_recover_seconds: 0.5 }
     }
 }
 

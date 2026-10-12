@@ -7,8 +7,8 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
 use crate::state::{CarId, Controls, Pose, SimState, SlideState};
-use crate::tuning::Tuning;
-use crate::vehicle::wrap_angle;
+use crate::tuning::{Tuning, VehicleTuning};
+use crate::vehicle::{slide_threshold, wrap_angle};
 use crate::{Car, SimEvent, StepMode, World, step};
 
 /// Everything about a car that changes tick to tick, minus the (large) order paths.
@@ -48,6 +48,17 @@ pub struct Preview {
     /// `frames[i][c]`: car `cars[c]` after `i` ticks (`frames[0]` is the starting state).
     pub frames: Vec<Vec<CarFrame>>,
     pub events: Vec<SimEvent>,
+}
+
+/// Why the real car may leave the (ideal) preview at a tick: see `Preview::drift`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Drift {
+    /// Past the friction circle: the car runs wide.
+    Understeer,
+    /// Past the slide threshold: much less grip, much wider.
+    Slide,
+    /// Back within grip after a drift; the offset carries on.
+    Recover,
 }
 
 /// How live execution compares with a preview recorded before it.
@@ -96,6 +107,58 @@ impl Preview {
             }
         }
         None
+    }
+
+    /// Outer bound of where the real car could drift where this preview (run in
+    /// `StepMode::Ideal`) asks for more grip than the car has: for each frame, `None` on
+    /// track, or the widest point it could reach and why.
+    ///
+    /// Same rule as the vehicle model: an over-demanding command is scaled back onto the
+    /// friction circle, so the turn rate is divided by the grip demand; in a slide the
+    /// friction circle shrinks to `slide_grip`. Speed follows the plan (the real car also
+    /// scrubs speed, so this errs wide). After a drift the bound takes the planned turn again
+    /// for `recover_ticks`, keeping its offset. Only a hint: the real path depends on how
+    /// the slide develops, which this does not simulate.
+    pub fn drift(&self, car: CarId, vt: &VehicleTuning, dt: f32, recover_ticks: usize) -> Vec<Option<(Vec2, Drift)>> {
+        let frames: Vec<&CarFrame> = (0..=self.ticks()).map_while(|i| self.frame(car, i)).collect();
+        let mut out = vec![None; frames.len()];
+        // Outer bound: position, direction of travel, recovery ticks left.
+        let mut bound: Option<(Vec2, f32, usize)> = None;
+        for i in 1..frames.len() {
+            let (prev, f) = (frames[i - 1], frames[i]);
+            let speed = f.vel.length();
+            let kind = if f.grip_demand > slide_threshold(speed, vt) {
+                Some(Drift::Slide)
+            } else if f.grip_demand > 1.0 {
+                Some(Drift::Understeer)
+            } else {
+                None
+            };
+            let (pos, dir, left) = match (bound, kind) {
+                (None, None) => continue,
+                (None, Some(_)) => (prev.pose.pos, prev.pose.heading, recover_ticks),
+                (Some(_), None) if bound.is_some_and(|b| b.2 == 0) => {
+                    bound = None;
+                    continue;
+                }
+                (Some(b), _) => b,
+            };
+            let turn = wrap_angle(f.pose.heading - prev.pose.heading);
+            let mu = match kind {
+                Some(Drift::Slide) => vt.slide_grip,
+                _ => vt.grip,
+            };
+            let turn = match kind {
+                Some(_) => turn / (f.grip_demand * vt.grip / mu).max(1.0),
+                None => turn,
+            };
+            let dir = dir + turn;
+            let pos = pos + Vec2::from_angle(dir) * speed * dt;
+            let left = if kind.is_some() { recover_ticks } else { left - 1 };
+            out[i] = Some((pos, kind.unwrap_or(Drift::Recover)));
+            bound = Some((pos, dir, left));
+        }
+        out
     }
 
     /// Drops everything after `ticks` ticks.

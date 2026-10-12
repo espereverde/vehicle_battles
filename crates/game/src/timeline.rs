@@ -58,6 +58,8 @@ fn timeline(
                 }
                 ui.checkbox(&mut zones.enabled, "Danger zones (Z)")
                     .on_hover_text("Shade where the selected (or next) keypoint can go, in the grip color its path would get");
+                ui.checkbox(&mut zones.drift, "Drift (X)")
+                    .on_hover_text("Where the path is orange/red: how far out the real car could run wide or slide");
                 ui.separator();
                 ui.label("Turn (T):");
                 let shown = draft.shown_mode();

@@ -18,7 +18,7 @@ pub mod vehicle;
 pub use glam::Vec2;
 pub use fit::{Fit, fit_segment, sweep};
 pub use orders::{Drive, OrderQueue, Segment, Turn, TurnMode, hold_throttle};
-pub use preview::{CarFrame, Preview};
+pub use preview::{CarFrame, Drift, Preview};
 pub use replay::{Command, Replay};
 pub use rng::SimRng;
 pub use state::{Car, CarId, Controls, DriveMode, Pilot, Pose, SimState, SlideState};

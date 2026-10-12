@@ -3,7 +3,7 @@
 
 use sim::preview::Check;
 use sim::{
-    Command, Drive, OrderQueue, Pose, Preview, Replay, Segment, SimEvent, SimState, StepMode, Tuning, Turn, TurnMode,
+    Command, Drift, Drive, OrderQueue, Pose, Preview, Replay, Segment, SimEvent, SimState, StepMode, Tuning, Turn, TurnMode,
     Vec2, World, fit_segment, hold_throttle,
 };
 
@@ -428,4 +428,43 @@ fn sweep_spans_the_fit_search_space() {
         let nearest = fan.iter().flatten().map(|f| f.pose.pos.distance(target)).fold(f32::INFINITY, f32::min);
         assert!(fit.miss < 0.1 && nearest < 1.0, "{mode:?}: fit miss {} m, fan nearest {nearest} m", fit.miss);
     }
+}
+
+/// Drift bound: nothing on a turn within grip; past it, the bound runs outside the planned
+/// turn, wider for a slide than for understeer, and recovers after the turn.
+#[test]
+fn drift_bound_opens_outward_wider_when_sliding() {
+    let tuning = Tuning::default();
+    let vt = &tuning.vehicle;
+    let id = car_at(0.0).cars[0].id;
+    let spread = |g: f32| {
+        // One second of a left turn at `g`, then straight.
+        let mut s = car_at(20.0);
+        let hold = hold_throttle(20.0, vt);
+        s.cars[0].orders = queue(&[(drive(Turn::Lateral(g), hold), 60), (drive(Turn::Lateral(0.0), hold), 200)]);
+        let preview = Preview::run_in(StepMode::Ideal, &s, &World::default(), &tuning, 150);
+        let drift = preview.drift(id, vt, tuning.dt(), 30);
+        let kinds: Vec<_> = drift.iter().flatten().map(|d| d.1).collect();
+        // Widest gap between the plan and the bound (outward = to the right of a left turn).
+        let widest = drift
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| d.map(|(p, _)| p - preview.frame(id, i).unwrap().pose.pos))
+            .map(|off| off.length())
+            .fold(0.0, f32::max);
+        let last = drift.iter().rposition(Option::is_some);
+        (kinds, widest, last)
+    };
+
+    let (kinds, widest, _) = spread(1.0);
+    assert!(kinds.is_empty() && widest == 0.0, "within grip: {kinds:?}");
+
+    let (kinds, understeer, last) = spread(1.6);
+    assert!(kinds.contains(&Drift::Understeer) && !kinds.contains(&Drift::Slide), "{kinds:?}");
+    assert!(kinds.contains(&Drift::Recover));
+    assert!(last.unwrap() < 140, "bound should stop after recovering, ends at {last:?}");
+
+    let (kinds, slide, _) = spread(2.5);
+    assert!(kinds.contains(&Drift::Slide), "{kinds:?}");
+    assert!(understeer > 0.3 && slide > 2.0 * understeer, "understeer {understeer} m, slide {slide} m");
 }

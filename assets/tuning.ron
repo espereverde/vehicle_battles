@@ -49,6 +49,7 @@
         throttle_step: 0.05,        // per mouse-wheel notch
         max_lateral_g: 3.0,         // tightest planned turn (g), both turn modes
         straight_seconds: 1.0,      // length of a keypoint added with "Straight"
+        drift_recover_seconds: 0.5, // drift fans: how long the outward offset lingers after the plan is back in grip
     ),
     // Debug keyboard driving (M key toggles manual mode).
     // Full key input asks for a lateral grip demand, not a wheel angle.

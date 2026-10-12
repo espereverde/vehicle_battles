@@ -5,12 +5,16 @@
 //!
 //! The map is the fit's own search space (`sim::sweep`): a fan of constant turns, one per
 //! sampled turn value, meshed as quads between neighboring turns at consecutive ticks.
+//!
+//! Drift fans (X toggles): where the preview path is orange or red, the band between it and
+//! the widest line the real car could take (`Preview::drift`), fading outward. A hint at
+//! the consequences, not the real path.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy_egui::input::egui_wants_any_keyboard_input;
-use sim::{Segment, TurnMode};
+use sim::{Drift, Segment, TurnMode};
 
 use crate::planning::{Draft, PlanEdit, PlanPreview};
 use crate::render::{ZONE_COLORS, zone};
@@ -19,8 +23,11 @@ use crate::{AppState, Sim, TuningRes};
 /// Turn values sampled across the fit's range.
 const TURNS: usize = 81;
 const ALPHA: f32 = 0.18;
-/// Below the road (z = -1 is the road, gizmos draw on top).
+/// Above the road (z = -1), below the gizmos.
 const Z: f32 = -0.5;
+const DRIFT_Z: f32 = -0.4;
+/// Drift fan opacity at the planned path and at its outer bound.
+const DRIFT_ALPHA: (f32, f32) = (0.35, 0.04);
 
 pub struct ZonesPlugin;
 
@@ -28,7 +35,7 @@ impl Plugin for ZonesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<DangerZones>().add_systems(Startup, spawn).add_systems(
             Update,
-            (toggle.run_if(not(egui_wants_any_keyboard_input)), update.after(PlanEdit)).chain(),
+            (toggle.run_if(not(egui_wants_any_keyboard_input)), (update, update_drift).after(PlanEdit)).chain(),
         );
     }
 }
@@ -36,13 +43,14 @@ impl Plugin for ZonesPlugin {
 #[derive(Resource)]
 pub struct DangerZones {
     pub enabled: bool,
+    pub drift: bool,
     /// What the current mesh was built for; `None` forces a rebuild.
     built_for: Option<Key>,
 }
 
 impl Default for DangerZones {
     fn default() -> Self {
-        Self { enabled: true, built_for: None }
+        Self { enabled: true, drift: true, built_for: None }
     }
 }
 
@@ -56,20 +64,73 @@ struct Key {
 #[derive(Component)]
 struct ZoneMesh;
 
+#[derive(Component)]
+struct DriftMesh;
+
 fn spawn(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>, mut materials: ResMut<Assets<ColorMaterial>>) {
-    commands.spawn((
-        ZoneMesh,
-        Mesh2d(meshes.add(zone_mesh(Vec::new(), Vec::new(), Vec::new()))),
-        MeshMaterial2d(materials.add(ColorMaterial::default())),
-        Transform::default(),
-        Visibility::Hidden,
-    ));
+    let material = materials.add(ColorMaterial::default());
+    // Bevy 0.19 logs a use-after-free error for meshes without vertices, so start from a
+    // degenerate, transparent triangle (never shown: the entities start hidden).
+    let mut empty = || Mesh2d(meshes.add(zone_mesh(vec![[0.0; 3]; 3], vec![[0.0; 4]; 3], vec![0, 1, 2])));
+    commands.spawn((ZoneMesh, empty(), MeshMaterial2d(material.clone()), Transform::default(), Visibility::Hidden));
+    commands.spawn((DriftMesh, empty(), MeshMaterial2d(material), Transform::default(), Visibility::Hidden));
 }
 
 fn toggle(keys: Res<ButtonInput<KeyCode>>, mut zones: ResMut<DangerZones>) {
     if keys.just_pressed(KeyCode::KeyZ) {
         zones.enabled = !zones.enabled;
     }
+    if keys.just_pressed(KeyCode::KeyX) {
+        zones.drift = !zones.drift;
+    }
+}
+
+/// Rebuilds the drift fans whenever the preview changes (paused or running).
+fn update_drift(
+    zones: Res<DangerZones>,
+    sim: Res<Sim>,
+    tuning: Res<TuningRes>,
+    plan: Res<PlanPreview>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut shown: Single<(&Mesh2d, &mut Visibility), With<DriftMesh>>,
+) {
+    let (handle, visibility) = &mut *shown;
+    let Some(preview) = plan.preview.as_ref().filter(|_| zones.drift) else {
+        **visibility = Visibility::Hidden;
+        return;
+    };
+    if !(plan.is_changed() || zones.is_changed() || tuning.is_changed()) {
+        return;
+    }
+    let recover = (tuning.planner.drift_recover_seconds * tuning.tick_rate as f32).round() as usize;
+    let drift = preview.drift(sim.player, &tuning.vehicle, tuning.dt(), recover);
+
+    // Per tick: the planned point and the outer bound, colored by why it drifts (recovery
+    // keeps the color of the drift before it); quads between consecutive ticks.
+    let (mut positions, mut colors, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+    let mut last_kind = Drift::Understeer;
+    let mut prev_on = false;
+    for (i, d) in drift.iter().enumerate() {
+        let (Some((outer, kind)), Some(f)) = (d, plan.player_frame(i)) else {
+            prev_on = false;
+            continue;
+        };
+        if *kind != Drift::Recover {
+            last_kind = *kind;
+        }
+        let color = if last_kind == Drift::Slide { ZONE_COLORS[3] } else { ZONE_COLORS[2] };
+        let n = positions.len() as u32;
+        positions.push(f.pose.pos.extend(DRIFT_Z).to_array());
+        positions.push(outer.extend(DRIFT_Z).to_array());
+        colors.push(LinearRgba::from(color.with_alpha(DRIFT_ALPHA.0)).to_f32_array());
+        colors.push(LinearRgba::from(color.with_alpha(DRIFT_ALPHA.1)).to_f32_array());
+        if prev_on {
+            let (p0, o0, p1, o1) = (n - 2, n - 1, n, n + 1);
+            indices.extend_from_slice(&[p0, o0, o1, p0, o1, p1]);
+        }
+        prev_on = true;
+    }
+    show(&mut meshes, &handle.0, visibility, positions, colors, indices);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -89,7 +150,6 @@ fn update(
         zones.built_for = None;
         return;
     }
-    **visibility = Visibility::Inherited;
 
     let keypoint = draft.zone_keypoint();
     let key = Key { tick: sim.state.tick, keypoint, sweep: draft.sweep_key(keypoint, &tuning) };
@@ -123,10 +183,28 @@ fn update(
             indices.extend_from_slice(&[a0, b0, b1, a0, b1, a1]);
         }
     }
-    if let Some(mut mesh) = meshes.get_mut(&handle.0) {
+    show(&mut meshes, &handle.0, visibility, positions, colors, indices);
+    zones.built_for = Some(key);
+}
+
+/// Replaces the mesh behind `handle` and shows it, or just hides it when there is nothing
+/// to draw (never uploads an empty mesh, see `spawn`).
+fn show(
+    meshes: &mut Assets<Mesh>,
+    handle: &Handle<Mesh>,
+    visibility: &mut Visibility,
+    positions: Vec<[f32; 3]>,
+    colors: Vec<[f32; 4]>,
+    indices: Vec<u32>,
+) {
+    if indices.is_empty() {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    if let Some(mut mesh) = meshes.get_mut(handle) {
         *mesh = zone_mesh(positions, colors, indices);
     }
-    zones.built_for = Some(key);
+    *visibility = Visibility::Inherited;
 }
 
 fn zone_mesh(positions: Vec<[f32; 3]>, colors: Vec<[f32; 4]>, indices: Vec<u32>) -> Mesh {

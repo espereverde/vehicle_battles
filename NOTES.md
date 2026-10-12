@@ -149,7 +149,15 @@ Simplified:
   zone along the segment so far). Built from `sim::sweep`, the fit's own search space (81 turn
   values × up to 5 s, first loop only, ~2.4 ms), as one vertex-colored mesh; rebuilt only when
   the keypoint, its throttle/mode or the segments before it change, so dragging is free.
+- Drift fans (X, on by default; paused and running): where the preview is orange/red, shade the
+  band between the planned path and an outer bound of where the real car could go
+  (`Preview::drift`). Same rule as the vehicle model: the turn rate is divided by the grip demand
+  (understeer), and in a slide the friction circle shrinks to `slide_grip`, so slides fan out
+  much wider. Speed follows the plan (errs wide: the real car scrubs speed). The offset lingers
+  `drift_recover_seconds` (0.5 s) after the plan is back in grip. Only a hint: it does not
+  simulate the slide, so the exact real path stays hidden.
 
 Playtest (needs a human):
+- [ ] Do drift fans make slides feel fair without giving the outcome away? Too wide / too narrow?
 - [ ] Are the danger zones readable, and do players use them to pick keypoints?
 - [ ] Is the drag stable now? Do red/orange warnings make slides feel fair when they happen live?
