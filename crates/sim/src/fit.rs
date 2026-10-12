@@ -10,7 +10,8 @@ use std::f32::consts::TAU;
 use glam::Vec2;
 
 use crate::orders::{Drive, OrderQueue, Turn, TurnMode};
-use crate::state::{CarId, DriveMode, SimState};
+use crate::preview::CarFrame;
+use crate::state::{Car, CarId, DriveMode, SimState};
 use crate::tuning::Tuning;
 use crate::vehicle::wrap_angle;
 use crate::{StepMode, World, step};
@@ -55,46 +56,19 @@ pub fn fit_segment(
     max_ticks: u32,
     turned: f32,
 ) -> Fit {
-    let max_ticks = max_ticks.max(1);
     let eval = |value: f32| -> Fit {
         let turn = Turn::new(mode, value);
-        let mut s = state.clone();
-        if let Some(c) = s.car_mut(car) {
-            c.drive_mode = DriveMode::Orders;
-            c.orders = OrderQueue { segments: Vec::new(), tail: Drive { turn, throttle } };
-        }
         let mut best = Fit { turn, ticks: 1, miss: f32::INFINITY };
-        let mut turned = turned;
-        let mut heading = s.car(car).map_or(0.0, |c| c.pose.heading);
-        for t in 1..=max_ticks {
-            step(&mut s, world, tuning, StepMode::Ideal);
-            let Some(c) = s.car(car) else { break };
-            turned += wrap_angle(c.pose.heading - heading);
-            heading = c.pose.heading;
-            if turned.abs() >= TAU {
-                break;
-            }
+        run_candidate(state, world, tuning, car, Drive { turn, throttle }, max_ticks, turned, |t, c| {
             let fit = Fit { turn, ticks: t, miss: c.pose.pos.distance(target) };
             if fit.cmp(&best).is_lt() {
                 best = fit;
             }
-        }
+        });
         best
     };
 
-    // Turns are searched up to `max_lateral_g`; in steering mode that is the steering giving
-    // that much lateral g at the start speed. Grip-limited steering at speed is a small
-    // fraction of full lock, so steering samples are spaced cubically (dense near zero).
-    let max_g = tuning.planner.max_lateral_g;
-    let v0 = state.car(car).map_or(0.0, |c| c.forward_speed().max(0.0));
-    let max_steer = Turn::Lateral(max_g).steer(v0, &tuning.vehicle).abs();
-    let samples: Vec<f32> = (0..COARSE)
-        .map(|i| -1.0 + 2.0 * i as f32 / (COARSE - 1) as f32)
-        .map(|u| match mode {
-            TurnMode::Steer => u * u * u * max_steer,
-            TurnMode::Lateral => u * max_g,
-        })
-        .collect();
+    let samples = turn_samples(state, tuning, car, mode, COARSE);
     let coarse: Vec<Fit> = samples.iter().map(|&v| eval(v)).collect();
 
     // Refine around the most promising local minima (plateaus count once per run).
@@ -115,6 +89,83 @@ pub fn fit_segment(
         })
         .min_by(Fit::cmp)
         .expect("the coarse scan has at least one minimum")
+}
+
+/// Every place the drag tool can put the keypoint: for `n` turn values spread over the
+/// same range `fit_segment` searches, the car's frame after each tick of the segment
+/// (`sweep[i][t - 1]` is turn `i` after `t` ticks; turns run from hard right to hard left).
+/// Same limits as the fit: unlimited grip, `max_ticks`, first loop only.
+#[allow(clippy::too_many_arguments)]
+pub fn sweep(
+    state: &SimState,
+    world: &World,
+    tuning: &Tuning,
+    car: CarId,
+    mode: TurnMode,
+    throttle: f32,
+    max_ticks: u32,
+    turned: f32,
+    n: usize,
+) -> Vec<Vec<CarFrame>> {
+    turn_samples(state, tuning, car, mode, n)
+        .into_iter()
+        .map(|value| {
+            let mut frames = Vec::new();
+            let drive = Drive { turn: Turn::new(mode, value), throttle };
+            run_candidate(state, world, tuning, car, drive, max_ticks, turned, |_, c| frames.push(CarFrame::of(c)));
+            frames
+        })
+        .collect()
+}
+
+/// `n` turn values (at least 2) from hard right to hard left. Turns go up to
+/// `max_lateral_g`; in steering mode that is the steering giving that much lateral g at the
+/// start speed. Grip-limited steering at speed is a small fraction of full lock, so
+/// steering samples are spaced cubically (dense near zero).
+fn turn_samples(state: &SimState, tuning: &Tuning, car: CarId, mode: TurnMode, n: usize) -> Vec<f32> {
+    let n = n.max(2);
+    let max_g = tuning.planner.max_lateral_g;
+    let v0 = state.car(car).map_or(0.0, |c| c.forward_speed().max(0.0));
+    let max_steer = Turn::Lateral(max_g).steer(v0, &tuning.vehicle).abs();
+    (0..n)
+        .map(|i| -1.0 + 2.0 * i as f32 / (n - 1) as f32)
+        .map(|u| match mode {
+            TurnMode::Steer => u * u * u * max_steer,
+            TurnMode::Lateral => u * max_g,
+        })
+        .collect()
+}
+
+/// Drives `car` from `state` with constant `drive` in `StepMode::Ideal`, calling
+/// `visit(tick, car)` after each tick, for up to `max_ticks` (at least 1) or until its
+/// net heading change (starting at `turned`) reaches a full circle.
+#[allow(clippy::too_many_arguments)]
+fn run_candidate(
+    state: &SimState,
+    world: &World,
+    tuning: &Tuning,
+    car: CarId,
+    drive: Drive,
+    max_ticks: u32,
+    mut turned: f32,
+    mut visit: impl FnMut(u32, &Car),
+) {
+    let mut s = state.clone();
+    if let Some(c) = s.car_mut(car) {
+        c.drive_mode = DriveMode::Orders;
+        c.orders = OrderQueue { segments: Vec::new(), tail: drive };
+    }
+    let mut heading = s.car(car).map_or(0.0, |c| c.pose.heading);
+    for t in 1..=max_ticks.max(1) {
+        step(&mut s, world, tuning, StepMode::Ideal);
+        let Some(c) = s.car(car) else { break };
+        turned += wrap_angle(c.pose.heading - heading);
+        heading = c.pose.heading;
+        if turned.abs() >= TAU {
+            break;
+        }
+        visit(t, c);
+    }
 }
 
 /// Golden-section search for the best fit (see `Fit::cmp`) within `[lo, hi]`.

@@ -87,16 +87,23 @@ impl Trails {
 
 /// Grip-demand zone color: green < comfort < yellow < limit < orange (understeer);
 /// sliding is red.
-pub fn zone_color(demand: f32, sliding: bool, vt: &VehicleTuning) -> Color {
+/// Grip zone, from 0 (green, comfortable) to 3 (red, sliding).
+pub fn zone(demand: f32, sliding: bool, vt: &VehicleTuning) -> usize {
     if sliding {
-        css::RED.into()
+        3
     } else if demand > 1.0 {
-        css::ORANGE.into()
+        2
     } else if demand > vt.comfort_demand {
-        css::YELLOW.into()
+        1
     } else {
-        css::LIME.into()
+        0
     }
+}
+
+pub const ZONE_COLORS: [Srgba; 4] = [css::LIME, css::YELLOW, css::ORANGE, css::RED];
+
+pub fn zone_color(demand: f32, sliding: bool, vt: &VehicleTuning) -> Color {
+    ZONE_COLORS[zone(demand, sliding, vt)].into()
 }
 
 pub fn to_egui(c: Color) -> egui::Color32 {

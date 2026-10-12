@@ -403,3 +403,29 @@ fn fit_stays_on_the_first_loop() {
         assert!(net.abs() < std::f32::consts::TAU, "turned {turned}: keypoint after a full circle ({net} rad, {:?})", fit);
     }
 }
+
+/// The danger-zone fan covers the fit's search space: one arc per turn value, from hard
+/// right to hard left, no longer than the window, and fitted keypoints land inside it.
+#[test]
+fn sweep_spans_the_fit_search_space() {
+    let tuning = Tuning::default();
+    let world = World::default();
+    let start = car_at(15.0);
+    let id = start.cars[0].id;
+    for mode in [TurnMode::Steer, TurnMode::Lateral] {
+        let fan = sim::sweep(&start, &world, &tuning, id, mode, 0.2, 180, 0.0, 41);
+        assert_eq!(fan.len(), 41);
+        assert!(fan.iter().all(|arc| !arc.is_empty() && arc.len() <= 180));
+        // The hardest turns nearly close a loop, so look at how far they reach sideways.
+        let reach = |arc: &Vec<sim::CarFrame>| arc.iter().map(|f| f.pose.pos.y).fold(0.0f32, |m, y| if y.abs() > m.abs() { y } else { m });
+        assert!(reach(&fan[0]) < -5.0, "{mode:?}: first arc should turn right");
+        assert!(reach(&fan[40]) > 5.0, "{mode:?}: last arc should turn left");
+        let straight = fan[20].last().unwrap().pose.pos;
+        assert!(straight.y.abs() < 1e-3, "{mode:?}: middle arc should be straight, ends at {straight}");
+
+        let target = Vec2::new(25.0, 6.0);
+        let fit = fit_segment(&start, &world, &tuning, id, mode, 0.2, target, 180, 0.0);
+        let nearest = fan.iter().flatten().map(|f| f.pose.pos.distance(target)).fold(f32::INFINITY, f32::min);
+        assert!(fit.miss < 0.1 && nearest < 1.0, "{mode:?}: fit miss {} m, fan nearest {nearest} m", fit.miss);
+    }
+}

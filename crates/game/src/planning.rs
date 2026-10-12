@@ -47,6 +47,7 @@ impl Plugin for PlanningPlugin {
                         rebuild_preview,
                     )
                         .chain()
+                        .in_set(PlanEdit)
                         .run_if(in_state(AppState::Paused)),
                     follow_live.run_if(in_state(AppState::Running)),
                     draw_plan,
@@ -55,6 +56,10 @@ impl Plugin for PlanningPlugin {
             .add_systems(EguiPrimaryContextPass, plan_labels.run_if(in_state(AppState::Paused)));
     }
 }
+
+/// Editing the draft and rebuilding its preview (while paused).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlanEdit;
 
 /// The player's orders as being edited while paused.
 #[derive(Resource)]
@@ -176,15 +181,48 @@ impl Draft {
         self.set_ticks(k, seg.elapsed + fit.ticks, tuning);
     }
 
+    /// Throttle of a new keypoint after the last, starting at speed `v0`: the last one's,
+    /// unless that would leave the car sitting still.
+    fn new_throttle(&self, v0: f32, tuning: &TuningRes) -> f32 {
+        let throttle = self.orders.last_drive().throttle;
+        if v0 < 1.0 && throttle <= 0.0 { tuning.planner.default_throttle } else { throttle }
+    }
+
+    /// The keypoint the danger zones are shown for: the selected one, else a new one after
+    /// the last.
+    pub fn zone_keypoint(&self) -> usize {
+        let n = self.orders.segments.len();
+        self.selected.filter(|&k| k < n).unwrap_or(n)
+    }
+
+    /// Everything that decides where keypoint `k` can be dragged (see `sweep`), for telling
+    /// when that has changed.
+    pub fn sweep_key(&self, k: usize, tuning: &TuningRes) -> (Vec<Segment>, Option<(f32, TurnMode, u32)>, TurnMode) {
+        let seg = self.orders.segments.get(k).map(|s| (s.drive.throttle, s.drive.turn.mode(), self.max_ticks(k, tuning)));
+        (self.orders.segments[..k.min(self.orders.segments.len())].to_vec(), seg, self.mode)
+    }
+
+    /// Every place keypoint `k` (or a new one, when `k` is past the last) can be dragged to,
+    /// keeping its throttle and turn mode: `n` turn values, each with its frame per tick
+    /// (see `sim::sweep`). `None` if it starts beyond the preview or after the first loop.
+    pub fn sweep(&self, k: usize, sim: &Sim, tuning: &TuningRes, n: usize) -> Option<Vec<Vec<CarFrame>>> {
+        let (state, turned) = self.start_state(k, sim, tuning)?;
+        let (mode, throttle, max_ticks) = match self.orders.segments.get(k) {
+            Some(seg) => (seg.drive.turn.mode(), seg.drive.throttle, self.max_ticks(k, tuning) - seg.elapsed),
+            None => {
+                let v0 = state.car(sim.player)?.forward_speed().max(0.0);
+                let room = tuning.preview_ticks().saturating_sub(self.orders.start_tick(k));
+                (self.mode, self.new_throttle(v0, tuning), room)
+            }
+        };
+        Some(sim::sweep(&state, &sim.world, tuning, sim.player, mode, throttle, max_ticks, turned, n))
+    }
+
     /// Appends a keypoint aimed at `target`. Returns its index, or `None` when the existing
     /// keypoints already fill the preview.
     fn push(&mut self, target: Vec2, sim: &Sim, tuning: &TuningRes) -> Option<usize> {
         let k = self.orders.segments.len();
-        let v0 = self.start_speed(k, sim, tuning)?;
-        let mut throttle = self.orders.last_drive().throttle;
-        if v0 < 1.0 && throttle <= 0.0 {
-            throttle = tuning.planner.default_throttle;
-        }
+        let throttle = self.new_throttle(self.start_speed(k, sim, tuning)?, tuning);
         self.orders.segments.push(Segment::new(Drive { turn: Turn::new(self.mode, 0.0), throttle }, 1));
         self.refit(k, target, sim, tuning);
         self.selected = Some(k);

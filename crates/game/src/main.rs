@@ -11,6 +11,7 @@ mod timeline;
 mod track;
 mod tuning_file;
 mod ui;
+mod zones;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -81,6 +82,7 @@ fn main() {
             manual::ManualPlugin,
             replay::ReplayPlugin,
             ui::UiPlugin,
+            zones::ZonesPlugin,
         ))
         .add_systems(Update, (hotkeys.run_if(not(egui_wants_any_keyboard_input)), tuning_file::hot_reload))
         .add_systems(FixedUpdate, fixed_tick.run_if(in_state(AppState::Running)))

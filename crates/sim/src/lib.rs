@@ -16,7 +16,7 @@ pub mod tuning;
 pub mod vehicle;
 
 pub use glam::Vec2;
-pub use fit::{Fit, fit_segment};
+pub use fit::{Fit, fit_segment, sweep};
 pub use orders::{Drive, OrderQueue, Segment, Turn, TurnMode, hold_throttle};
 pub use preview::{CarFrame, Preview};
 pub use replay::{Command, Replay};

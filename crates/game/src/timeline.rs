@@ -8,6 +8,7 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use sim::{Turn, TurnMode};
 
 use crate::challenge::Challenge;
+use crate::zones::DangerZones;
 use crate::planning::{Draft, PlanPreview};
 use crate::render::{to_egui, zone_color};
 use crate::{AppState, Sim, TuningRes};
@@ -25,6 +26,7 @@ const STRIP: f32 = 12.0;
 const SPANS: f32 = 20.0;
 const MARKS: f32 = 16.0;
 
+#[allow(clippy::too_many_arguments)]
 fn timeline(
     mut contexts: EguiContexts,
     sim: Res<Sim>,
@@ -33,6 +35,7 @@ fn timeline(
     mut draft: ResMut<Draft>,
     mut plan: ResMut<PlanPreview>,
     mut next: ResMut<NextState<AppState>>,
+    mut zones: ResMut<DangerZones>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     // Reborrow so disjoint fields can be borrowed separately.
@@ -53,6 +56,8 @@ fn timeline(
                 if ui.add_enabled(!draft.orders.segments.is_empty(), egui::Button::new("Clear")).clicked() {
                     draft.clear();
                 }
+                ui.checkbox(&mut zones.enabled, "Danger zones (Z)")
+                    .on_hover_text("Shade where the selected (or next) keypoint can go, in the grip color its path would get");
                 ui.separator();
                 ui.label("Turn (T):");
                 let shown = draft.shown_mode();

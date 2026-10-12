@@ -19,6 +19,7 @@ The game starts paused. Plan, then press Space to watch it play out.
 | LMB on ground | add a keypoint there (drag to place it) |
 | LMB drag a keypoint ghost | further from the car = later, sideways = more turn |
 | Wheel | throttle ±5% of the dragged, hovered or selected keypoint (negative = brake) |
+| Z / "Danger zones" checkbox | shade where the selected (or next) keypoint can go, in the grip color its path would get |
 | T / "Steering · G-force" buttons | turn mode: constant steering or constant lateral g |
 | S / "Straight" button | selected keypoint drives straight at its start speed; with none selected, adds a 1 s straight keypoint |
 | RMB on a ghost, Del | delete keypoint |

@@ -144,6 +144,12 @@ Simplified:
   (it used to reach a target on the second lap with a gentler turn).
 - Turn cap for the drag tool: `max_lateral_g` raised from 2.0 to 3.0 g (2× grip) and now applied
   to steering mode too, as the steering that gives that much lateral g at the segment's start speed.
+- Danger zones (Z, on by default): while paused, the area the selected keypoint (or a new one
+  after the last) can be dragged to is shaded in the color its segment would have there (worst
+  zone along the segment so far). Built from `sim::sweep`, the fit's own search space (81 turn
+  values × up to 5 s, first loop only, ~2.4 ms), as one vertex-colored mesh; rebuilt only when
+  the keypoint, its throttle/mode or the segments before it change, so dragging is free.
 
 Playtest (needs a human):
+- [ ] Are the danger zones readable, and do players use them to pick keypoints?
 - [ ] Is the drag stable now? Do red/orange warnings make slides feel fair when they happen live?
