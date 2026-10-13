@@ -20,7 +20,7 @@ pub mod vehicle;
 pub use glam::Vec2;
 pub use fit::{Fit, ReachMap, fit_segment, sweep};
 pub use swerve::{fit_swerve, sweep_swerve};
-pub use orders::{Drive, OrderQueue, Segment, Turn, TurnMode, hold_throttle};
+pub use orders::{Drive, OrderQueue, Phase, Segment, Turn, TurnMode, hold_throttle};
 pub use preview::{CarFrame, Drift, Preview, RiskStretch};
 pub use replay::{Command, Replay};
 pub use rng::SimRng;
@@ -88,7 +88,7 @@ pub fn step(state: &mut SimState, _world: &World, tuning: &Tuning, mode: StepMod
     let SimState { tick, cars, rng } = state;
     let tick = *tick;
     for car in cars.iter_mut() {
-        for _ in 0..control::drive(car, &tuning.vehicle) {
+        for _ in 0..control::drive(car, &tuning.vehicle, dt) {
             let remaining = car.orders.segments.len();
             out.events.push(SimEvent::SegmentCompleted { car: car.id, tick, remaining });
         }

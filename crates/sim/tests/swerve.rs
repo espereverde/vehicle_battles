@@ -81,3 +81,26 @@ fn sweep_covers_both_sides() {
     assert!(rows[10].iter().flatten().all(|&(p, z)| z == 0 && p.y.abs() < 0.1));
     assert!(rows[0].iter().flatten().any(|&(_, z)| z == 3) && rows[20].iter().flatten().any(|&(_, z)| z == 3));
 }
+
+/// Short, sharp swerves (where the steering rate matters) and swerves that start with the
+/// wheels still turned from the previous keypoint end with the start heading and the wheels
+/// straight, so the car carries on straight after the keypoint.
+#[test]
+fn sharp_swerves_keep_the_heading() {
+    let tuning = Tuning::default();
+    let max = tuning.vehicle.max_steer_deg.to_radians();
+    for (wheels, v, x, y) in [(0.0, 15.0, 12.0, 3.0), (0.0, 15.0, 8.0, 2.0), (0.0, 10.0, 6.0, 2.0), (0.0, 20.0, 15.0, 4.0), (0.0, 8.0, 5.0, 2.5), (0.5, 15.0, 12.0, 3.0), (-0.5, 15.0, 12.0, 3.0), (-0.8, 10.0, 15.0, 2.0)] {
+        let mut start = car_at(v);
+        start.cars[0].steer_angle = wheels * max;
+        let fit = fit_swerve(&start, &World::default(), &tuning, start.cars[0].id, 0.2, Vec2::new(x, y), 300);
+        let mut s = start.clone();
+        s.cars[0].orders = OrderQueue { segments: vec![Segment::new(Drive { turn: fit.turn, throttle: 0.2 }, fit.ticks)], tail: Drive { turn: fit.turn, throttle: 0.2 } };
+        for _ in 0..fit.ticks {
+            sim::step(&mut s, &World::default(), &tuning, StepMode::Ideal);
+        }
+        let case = format!("wheels {wheels}, {v} m/s -> ({x}, {y}): {fit:?}");
+        let car = &s.cars[0];
+        assert!(car.pose.heading.abs() < 1f32.to_radians(), "{case}: heading {}°", car.pose.heading.to_degrees());
+        assert!(car.steer_angle.abs() < 0.5f32.to_radians(), "{case}: wheels at {}°", car.steer_angle.to_degrees());
+    }
+}

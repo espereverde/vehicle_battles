@@ -234,3 +234,20 @@ and correction passes; judged overcomplicated and replaced.)
 - Tests (`tests/swerve.rs`): reaches the target with the start heading (lane changes both ways,
   slow car, standing start, braking, small offset at 25 m/s), equal and opposite halves, drag
   never jumps, danger-zone map covers both sides and reaches red.
+
+Playtest feedback: short, sharp swerves don't keep the orientation.
+- Cause: the steering actuator (`steer_rate_deg`, 120°/s). The swerve flipped its command at
+  the midpoint, so the swing across ended late and the segment ended with the wheels still
+  turned (the car kept yawing after the keypoint). Negligible for long swerves; up to 40° off
+  for sharp ones, and as bad when the swerve started with the wheels turned from the previous
+  keypoint.
+- Fix (`Turn::steer_at`): the wheels turn in at the steering rate, and from where the swing
+  across must start (a ramp centered on the midpoint) a closed loop re-solves each tick the
+  wheel level that undoes the heading change so far with the wheels straight on the last tick
+  (ramps integrated in closed form, false-position solve). Nominally this is the antisymmetric
+  profile; it also absorbs speed changes and a turned start. Segments remember their
+  `start_heading` (runtime state like `elapsed`); `Drive::controls` takes a `Phase`.
+- Heading within 1° and wheels straight at the end in every case tried. Very sharp targets
+  that the old swerve "reached" by ending crooked are now out of reach (the keypoint lands
+  where the car really can go). Fit ~3–6 ms (was ~2–3), sweep ~18 ms (was ~10).
+- Test: `sharp_swerves_keep_the_heading` (short swerves at 8–20 m/s, turned start both ways).
