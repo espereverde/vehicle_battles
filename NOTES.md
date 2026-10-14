@@ -251,3 +251,168 @@ Playtest feedback: short, sharp swerves don't keep the orientation.
   that the old swerve "reached" by ending crooked are now out of reach (the keypoint lands
   where the car really can go). Fit ~3–6 ms (was ~2–3), sweep ~18 ms (was ~10).
 - Test: `sharp_swerves_keep_the_heading` (short swerves at 8–20 m/s, turned start both ways).
+
+### M2 rework, step 1 — kinematic car
+
+Playtest verdict: the grip simulation costs too much and is hard to gamify. Plan: Car Wars
+handling in continuous time (WORK_PLAN.md, "M2 rework"). Step 1 removes the physics:
+- `vehicle.rs` is a kinematic bicycle: the wheels take the commanded angle at once, the car
+  rolls along its heading at `v · tan δ / L`. No friction circle, understeer, slides or
+  handbrake turns (the handbrake only brakes). `grip_demand` is still computed, only as the
+  stability gauge's input, until step 2 replaces the gauge with handling status.
+- Loss of control is only reported (event, gauge reset to `after_loss`); crash results that
+  move the car come in step 5.
+- Removed: `SlideState`/`Car::slide`, slide events, slip angle and lateral speed, the
+  steering actuator (`steer_rate_deg`), slide/understeer/handbrake-slide tuning, yaw kicks,
+  uncertainty fans (`Preview::drift`, X toggle, `drift_recover_seconds`), the friction-circle
+  slide ring. The closed-loop swerve controller (above) is reverted to the plain midpoint flip:
+  with instant steering the halves cancel exactly. Swerve rates are capped at the steering
+  lock so the halves stay equal.
+- Tests: vehicle tests rewritten (kinematic circle at any speed, instant wheels, handbrake
+  only brakes, full lock at speed loses control via the gauge); determinism now checks risk
+  checks and losses of control instead of slides.
+- Also removed after step 1: the g-force turn mode (`Turn::Lateral`; steering already is a
+  constant turn radius, which is what a Car Wars bend is) and the danger zones (`zones.rs`,
+  `sim::sweep`, `sweep_swerve`, `ReachMap`): they shaded by grip demand from simulation
+  sweeps. Risk shading may come back in closed form with the maneuvers (step 3). T now
+  toggles steering ↔ swerve. Tests ported to steering turns of the same lateral g.
+
+### M2 rework, step 2 — handling status
+
+- `sim::handling` replaces the stability gauge (`stability.rs`, `StabilityTuning`, grip demand,
+  `grip`/`comfort_demand`, risk interval, min speed, after-loss reset all gone).
+  - HS = handling class (`vehicle.handling_class`) − `Car::handling_lost`; recovers
+    `max(1, HC + pilot.skill)`/s (skill is now a Car Wars driver bonus, default 0); floor −6.
+  - Drain per tick: |heading change| / 15°, plus braking beyond 10 mph/s by the book's
+    progression (15 → 1/s, 20 → 2, 25 → 3, +2 per 5 mph/s).
+  - Control Table: `p_fail = clamp((mph − 106 − 27·HS) / 130, 0, 1)`; per tick
+    `1 − (1 − p_fail)^drain`, at the drained status, before recovery.
+  - `handling::hazard`: discrete check after dropping HS by a difficulty (D0 allowed), or at a
+    forced status. No callers yet (hazards come in step 6).
+  - Loss of control still only reported; no checks for `loss_seconds` (1 s) after one.
+  - `SimEvent::Risk` only for checks with a chance > 0.
+- Display: risk zones (`handling::zone`: green safe, yellow risky to maneuver, orange risky,
+  red certain) color the path, trails, timeline strip and handling bar; the timeline graph
+  shows HS and, per second, the chance of losing control (`Preview::risk_per_second`).
+  Inspector shows HS and the chance per point or this tick. Acceleration circle removed.
+  Manual keyboard steering now asks for lateral g (`full_steer_g`, `push_steer_g`).
+- Calibration finding: HS is a threshold system. While the drain rate (°/s / 15) stays below
+  recovery (HC/s), HS stays full and there is no risk; above it HS falls linearly. On the slalom
+  the drain is about speed/4 points/s (≈ 85° of heading per gate). With HC 2 only ~8 m/s is safe
+  (33 s, the old 20.5 s limit was unwinnable). Default HC is now 3 and the slalom limit 18.0 s:
+  14 m/s finishes in 18.7 s safely, 15 m/s in 17.4 s with a 60% loss chance, 16 m/s certainly
+  loses control (smooth-line scripted driver, not kept).
+- Tests: `tests/handling.rs` (Control Table spot checks against the book, one point = one roll
+  at any tick rate, bends drain by angle at any speed, recovery and cap, braking table, checks
+  at the floor, straights are safe, ideal never loses control, skid/spin and the loss timer,
+  dice from the state, hazards incl. D0 and forced status, preview stretches and per-second
+  risk). Handling tests pin HC 2.
+
+### M2 rework — drift replaces the swerve
+
+Playtest feedback: (1) the swerve swung at low speed; (2) a longer swerve with the same
+sideways/forward ratio cost nothing while a shorter one drained handling. Causes: the halves
+were equal in *time*, so a car slowing down (or stopping) never turned back (+31° to +82°
+measured when braking); and swerves were charged as bends, whose total (90° each way in the
+screenshots) does not depend on length, so a longer one just recovered more meanwhile.
+
+- `Turn::Swerve` → `Turn::Drift(ratio)` (`TurnMode::Drift`, `sim::drift`): ratio = sideways per
+  forward over the drift, at most ½ (the book's steep drift).
+- Path: S-curve of two arcs of equal *length*, each turning `θ = 2·atan(ratio)` (53° at ½).
+  Steering does not affect speed in the kinematic model, so the controller predicts the
+  distance the segment's remaining ticks will cover (`drift::travel`) and switches curvature
+  exactly halfway (the tick straddling the switch gets the weighted mix). Heading comes back
+  within 0.2° (in practice ~0) at any speed, braking to a stop included. Curvature is capped at
+  the steering lock before splitting, so a lock-limited drift stays symmetric (it just moves
+  less sideways). Segments carry `traveled` (runtime, like `elapsed`); `Drive::controls` takes a
+  `Phase` and `dt`.
+- Cost (`handling::drain`): while drifting, `drift::cost_per_inch(ratio)` per inch forward
+  (0 → 1 at ¼, 1 → 3 at ½; `drift_cost`, `steep_drift_cost` in tuning) instead of the bend
+  cost of its heading changes. Twice as long at the same ratio = twice the cost.
+- Fit (`fit_drift`): closed form. Ratio from the target (capped at ½), then for each candidate
+  length (1D speed integration) the arc angle is limited by the lock; keeps the closest end
+  point. No simulation runs.
+- Note: the slalom (10 m sideways per 20 m forward) is exactly a steep drift: ~13 points per
+  gate drifting vs ~5–6 bending, so bending through it stays the better line.
+- Tests: `tests/drift.rs` (heading kept at any speed/throttle incl. stopping, flip at half the
+  distance, sideways ratio, cost by steepness and length, fit within ½ and capped beyond,
+  steering lock, drag continuity); `tests/swerve.rs` removed.
+
+### M2 rework, step 3 — closed-form keypoints, per-keypoint risk
+
+- `fit_bend` replaces the simulation-based `fit_segment` (61 coarse candidates + golden-section
+  refinement, each a full simulation): a constant wheel angle is a constant curvature at any
+  speed, so the bend is the arc tangent to the car through the target, `κ = 2y / (x² + y²)` in
+  the car's frame, capped by the lock and `max_lateral_g` at the start speed; its length after
+  `n` ticks comes from the 1D speed integration, and the closest arc point picks the duration
+  (first loop only, as before). Drifts already fit in closed form (`fit_drift`). The orders
+  tests run in ~0.01 s instead of ~0.75 s.
+- Keypoint labels and the keypoint editor show "D 3.2 · 18% loss": handling drained over the
+  segment and its chance of losing control (`Preview::span_risk`); per-second risk was step 2.
+- Removed `planner.max_lateral_g` (3 g): a grip-model leftover that capped only dragged bends
+  (radius ≥ 13.6 m at 72 km/h, 31 m at 108 km/h; the steering lock limited below 38 km/h).
+  Dragged bends are now limited only by the steering lock (radius 3.9 m), like the editor,
+  drifts and the simulation; tightness at speed is priced by handling (the book allows a 90°
+  bend in 1" at any speed).
+
+### M2 rework, steps 4–5 — crash tables, slides, controlled skid
+
+- `sim::crash`: loss of control rolls Crash Table 1 (maneuvers: 2d6 + (D − 3) + speed
+  modifier − skill) or 2 (hazards, `handling::hazard`: fishtails, then table 1 on 9+). Speed
+  modifier from the Control Table's column (−3 at ≤10 mph … 0 at 35–40, +1 at 45–60, then +1
+  per 30 mph). D = the maneuver's drain per inch at that tick (one book maneuver per inch: a
+  90° turn within an inch is D6) plus hard braking's D per second. `Crash` replaces
+  `LossKind`; `Risk` events carry `severe_chance` (spinout or worse) instead of spin chance;
+  the 1 s `loss_seconds` pause and skid/spin speeds are gone.
+- Results are kinematic `Slide`s (`Car::slide`): the car moves along a fixed direction while
+  its heading does its own thing; controls are ignored (orders keep their time), handling
+  recovers, no control checks. Skids (¼", ½" −5 mph, 1" −10 mph, 1½" −20 mph: follow-up skids
+  added in) slide straight on along the travel direction (in a bend, the tangent; it was the
+  direction of an inch earlier, which threw cars out of bends) while the nose keeps turning
+  at the yaw rate the car had, then
+  ease back onto the nose (`Car::slip`). Spinout: 450°/s, −20 mph/s, recovery
+  roll at HS −6 every second (facing the travel direction → drives on, else T-stop at
+  −20 mph per inch); without dice (Ideal) it spins to a stop. Roll: sideways, −20 mph/s to a
+  stop (burning on 4–6, display only). Vault: 1d6" airborne, then roll. Fishtails: rear swings
+  15/30/45° about the far front corner, car drives on along the new heading. `CrashTuning`
+  holds the book values. `SlideEnded` event.
+- Controlled skid (`Turn::Skid { steer, slide }`, T cycles steering → drift → skid): steers as
+  a bend until the segment's last `slide` inches (predicted with `drift::travel`), then slides
+  them along the segment's start heading keeping the turned heading (speed still follows the
+  pedals, so it ends with the segment), +`skid_cost_per_inch` (4) points per inch at the start
+  (checked like any drain), speed loss 0/5/5/10 mph at ¼/½/¾/1" applied at the end.
+  Segments carry `start_heading` and `skidding` (runtime). `fit_skid`: closed form, the bend
+  aims at the target minus the slide. Planning locks a started skid (`Draft::locked`: no
+  refit, throttle, duration, mode or delete; Clear keeps it): the commitment window.
+- Display: car body color by slide (cyan controlled, orange skid/T-stop, red spinout/roll with
+  a cross for rolls, white airborne, ring when burning); inspector slide row; risk labels
+  "34% loss (20% spinout+) at 2.1 s".
+- Not done: tire damage (no damage model yet), crash damage, fire.
+- Tests: `tests/crash.rs` (tables and modifiers vs the book, skids' distance/heading/speed,
+  spinout rate/decel/stop and seeded recovery, roll and vault, fishtail pivot, worse crashes
+  for harder/faster maneuvers, lag heading ≈ an inch of turning, controlled skid geometry,
+  cost and speed loss, skid fit); handling test: a loss starts a slide and pauses checks.
+
+Playtest feedback: the controlled skid was backwards (it bent, then suddenly changed its
+direction of travel back while keeping the turned nose). Now `Turn::Skid { angle, slide }`:
+from the segment's start the car keeps moving along its heading for `slide` inches while the
+nose swings by `angle` (≤ `max_skid_deg`, 90°) over the first `skid_turn_inches` (¼"), then
+drives straight along the new nose; the bend (angle / 15°) and the slide (4 per inch) are
+charged together when it starts, like the book's roll after the maneuver and before the
+skid. `Slide` got `turn`/`turn_per_m` for the swing. `fit_skid`: the nose points from the
+slide's end at the target, and the predicted distance includes the slide's speed loss.
+
+Playtest feedback: the skid was invisible (the car just turned). The book's slide is at most a
+car length: at 72 km/h the nose swung in 3–4 ticks and the whole ½" skid took 0.11 s. Now the
+slide is measured in time: `skid_seconds_per_inch` (1.0) turns the book's ¼"–1" into ¼–1 s of
+sliding, the nose swings over the first `skid_turn_seconds` (0.25 s), counted in ticks
+(`Slide::ticks_left`, `turn_step`; `control::skid_ticks`) so the fit's prediction is exact.
+Costs stay the book's (per 15° and per ¼"). The sideways carry grows with speed. `fit_skid`
+aims the nose from where the slide ends per candidate duration (the slide's length depends on
+speed); targets needing more than 90° are capped and predicted correctly.
+- Bug (playtest): the controlled skid was never checked. The controller starts its slide and
+  charges its cost in the same tick, and `handling::update` skipped sliding cars, so the skid
+  suppressed its own check (and showed as safe in the preview). Now only a slide already
+  going on when the tick began skips checks (`was_sliding`); a skid is checked as it starts
+  (bend + slide points at once, crash difficulty the same), and losing control there replaces
+  the skid with the crash result. Test: `controlled_skid_is_checked_when_it_starts`.

@@ -1,4 +1,4 @@
-//! Sanity checks that the car drives, brakes and slides believably.
+//! Sanity checks for the kinematic car: it drives, brakes and turns exactly as commanded.
 
 use sim::{Controls, DriveMode, Pose, SimEvent, SimState, StepMode, Tuning, Vec2, World};
 
@@ -47,70 +47,55 @@ fn brakes_to_a_stop_without_reversing() {
     assert_eq!(car.vel, Vec2::ZERO);
     // v²/(2a) with a ≈ 9.3 m/s² is ~48 m.
     assert!((40.0..60.0).contains(&car.pose.pos.x), "stopping distance {}", car.pose.pos.x);
-    assert!(car.slide.is_none());
 }
 
+/// The handbrake only adds braking: shorter stop, no rotation.
 #[test]
-fn gentle_turn_keeps_grip() {
-    let mut s = car_at_speed(10.0);
-    let events = drive(&mut s, full(0.3, 0.1), 5.0);
-    assert!(events.is_empty(), "unexpected slide: {events:?}");
-    assert!(s.cars[0].slip_angle().abs() < 0.01);
+fn handbrake_brakes_harder_without_turning() {
+    let mut brake = car_at_speed(20.0);
+    drive(&mut brake, Controls { brake: 1.0, ..Default::default() }, 4.0);
+    let mut both = car_at_speed(20.0);
+    drive(&mut both, Controls { brake: 1.0, handbrake: true, ..Default::default() }, 4.0);
+    assert!(both.cars[0].pose.pos.x < brake.cars[0].pose.pos.x - 2.0);
+    assert_eq!(both.cars[0].pose.heading, 0.0);
 }
 
-/// Full lock at speed: the car understeers, drains its stability and loses control, then
-/// regains grip once the wheel is straightened.
+/// The wheels take the commanded angle at once, and the car turns on the kinematic circle
+/// of radius `L / tan δ` at any speed: no understeer, never moving sideways.
 #[test]
-fn full_lock_at_speed_loses_control_then_recovers() {
+fn turns_on_the_kinematic_circle_at_any_speed() {
+    let vt = Tuning::default().vehicle;
+    for (v, steer) in [(5.0, 1.0), (15.0, 0.3), (30.0, 0.15)] {
+        let mut s = car_at_speed(v);
+        drive(&mut s, full(0.3, steer), 1.0 / 60.0);
+        let delta = steer * vt.max_steer_deg.to_radians();
+        assert_eq!(s.cars[0].steer_angle, delta, "wheels lag the command");
+
+        let radius = vt.wheelbase / delta.tan();
+        let center = Vec2::new(0.0, radius);
+        for _ in 0..20 {
+            drive(&mut s, full(0.3, steer), 0.1);
+            let car = &s.cars[0];
+            let off = car.pose.pos.distance(center) - radius;
+            assert!(off.abs() < 0.02 * radius, "{v} m/s, steer {steer}: {off} m off the circle");
+            let sideways = car.vel.dot(car.pose.left());
+            assert!(sideways.abs() < 1e-3, "{v} m/s: moving sideways at {sideways} m/s");
+        }
+    }
+}
+
+/// Full lock at speed: the car still follows the lock, but drains its stability and loses
+/// control (decided by the gauge, not the tires).
+#[test]
+fn full_lock_at_speed_loses_control() {
     let mut s = car_at_speed(30.0);
     let events = drive(&mut s, full(0.0, 1.0), 1.0);
     assert!(events.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "{events:?}");
-    assert!(s.cars[0].slip_angle().abs() > 0.1, "slide without slip angle");
-
-    let events = drive(&mut s, full(0.0, 0.0), 4.0);
-    assert!(events.iter().any(|e| matches!(e, SimEvent::SlideEnded { .. })), "never recovered");
-    assert!(s.cars[0].slide.is_none());
 }
 
 #[test]
-fn handbrake_turn_rotates_the_car() {
-    let mut s = car_at_speed(15.0);
-    drive(&mut s, Controls { steer: 1.0, handbrake: true, ..Default::default() }, 1.0);
-    let car = &s.cars[0];
-    assert!(car.pose.heading > 1.0, "heading {}", car.pose.heading);
-}
-
-#[test]
-fn full_lock_at_low_speed_understeers_without_sliding() {
-    // ~32 km/h, full lock and some throttle: well past the friction circle, but too slow to spin.
-    let mut s = car_at_speed(9.0);
-    let events = drive(&mut s, full(0.3, 1.0), 3.0);
-    assert!(events.is_empty(), "slid at low speed: {events:?}");
-    let car = &s.cars[0];
-    assert!(car.grip_demand > 1.0, "test should be past the limit, demand {}", car.grip_demand);
-    // Runs wide: the turn is limited to the grip limit, not the kinematic yaw rate.
-    let vt = Tuning::default().vehicle;
-    let max_lat = car.forward_speed() * car.yaw_rate;
-    assert!(max_lat.abs() <= vt.grip * vt.gravity * 1.001, "lateral accel {max_lat}");
-}
-
-/// Past the grip limit the tires alone never break into a slide: the car understeers until
-/// the stability gauge runs out.
-#[test]
-fn overdrive_understeers_until_stability_runs_out() {
-    let tuning = Tuning::default();
-    let v: f32 = 25.0;
-    let vt = &tuning.vehicle;
-    // Wheel angle that asks for 1.5× the grip at speed v.
-    let delta = (1.5 * vt.grip * vt.gravity * vt.wheelbase / (v * v)).atan();
-    let steer = delta / vt.max_steer_deg.to_radians();
-
-    let mut s = car_at_speed(v);
-    s.cars[0].stability = 1.0;
-    let events = drive(&mut s, full(0.3, steer), 0.2);
-    assert!(events.is_empty(), "lost control before the gauge emptied: {events:?}");
-    assert!(s.cars[0].grip_demand > 1.0 && s.cars[0].slide.is_none());
-
-    let events = drive(&mut s, full(0.3, steer), 2.0);
-    assert!(events.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "{events:?}");
+fn gentle_turn_is_uneventful() {
+    let mut s = car_at_speed(10.0);
+    let events = drive(&mut s, full(0.3, 0.1), 5.0);
+    assert!(events.is_empty(), "{events:?}");
 }

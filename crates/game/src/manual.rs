@@ -34,11 +34,11 @@ fn read_drive_input(
         return;
     }
     let any = |codes: &[KeyCode]| keys.any_pressed(codes.iter().copied());
-    let v = car.forward_speed();
+    let v = car.speed();
     let (kb, vt) = (&tuning.keyboard, &tuning.vehicle);
 
     // Steering input builds up while a key is held, and returns through zero when released
-    // or reversed, so the grip zones can be crossed gradually with a digital key.
+    // or reversed, so turns can be tightened gradually with a digital key.
     let mut dir = 0.0;
     if any(&[KeyCode::KeyA, KeyCode::ArrowLeft]) {
         dir += 1.0;
@@ -50,14 +50,10 @@ fn read_drive_input(
     let target = if dir * *steer_in < 0.0 { 0.0 } else { dir };
     *steer_in += (target - *steer_in).clamp(-rate * time.delta_secs(), rate * time.delta_secs());
 
-    // Input = fraction of a target lateral grip demand: tan δ = a_lat · L / v².
-    let demand = if any(&[KeyCode::ControlLeft, KeyCode::ControlRight]) {
-        kb.push_steer_demand
-    } else {
-        kb.full_steer_demand
-    };
+    // Input = fraction of a target lateral acceleration: tan δ = a_lat · L / v².
+    let g = if any(&[KeyCode::ControlLeft, KeyCode::ControlRight]) { kb.push_steer_g } else { kb.full_steer_g };
     let max_steer = vt.max_steer_deg.to_radians();
-    let a_lat = *steer_in * demand * vt.grip * vt.gravity;
+    let a_lat = *steer_in * g * vt.gravity;
     let delta = (a_lat * vt.wheelbase / (v * v).max(1e-3)).atan().clamp(-max_steer, max_steer);
     let steer = delta / max_steer;
 

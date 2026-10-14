@@ -195,6 +195,94 @@ skid need handbrake/reverse segments and come after the slalom playtest.
 - Is the pause → plan → watch rhythm enjoyable without any combat?
 - If not: tune; if still not, rethink before continuing.
 
+### M2 rework — Car Wars handling in continuous time (M)
+
+The grip/steering simulation costs too much (nested simulation fits, per-point sweeps) and is
+hard to gamify. Replace it with the spirit of *Car Wars Classic* (Movement chapter, pp. 7–18):
+handling status, maneuver difficulty, control checks, hazards, crash tables — run continuously
+in real time with pauses. Later milestones' "stability" means handling status, and "grip" means
+surfaces.
+
+**Units.** 1" = 15 ft = 4.57 m (about one car length); speeds shown in mph.
+
+**Kinematic car.** Steering is instantaneous; no friction circle, no understeer or slide
+physics. The car follows its maneuver's geometry exactly unless a crash result takes over.
+
+**Easing.** The book decides where a slide ends up (distance, final heading, speed lost); how
+the car gets there is eased so nothing changes in one tick (`sim/src/ease.rs`, `crash:` easing
+keys in `tuning.ron`): the direction of travel swings into a slide and back onto the nose
+after it (regrip), nose swings (controlled skid, roll, fishtail) ease in and out, spinouts spin
+up and wind down, and a skid's speed loss scrubs off while it slides. The skid fit models the
+regrip, so keypoints still land where the car goes. *Built.*
+
+**Handling.**
+- Handling Class (HC) = car + pilot (reflexes, skill). Handling Status (HS) starts at HC.
+- Maneuvers drain HS continuously; HS recovers continuously at `max(1, HC + skill)` per second,
+  capped at its starting value. HS floor −6.
+
+**Maneuvers** (continuous; drain is by geometry, per distance, independent of speed):
+- Bend: 1 point per 15° of heading change.
+- Drift: ends pointing the way it started, moving sideways; up to ¼" sideways per inch forward
+  drains 1 per inch (proportionally less below), rising to 3 per inch at ½" per inch (steep
+  drift); ½" per inch is the maximum. On the ground an S-curve of two arcs of equal length
+  (its heading changes are not charged as bends). *Built.*
+- Controlled skid: an entry (bend) then a slide of ¼"–1" along the old direction while the nose
+  keeps the new one; +1 to +4 points, slows the car (tire wear waits for damage). *Built.*
+- Maneuvers may have a commitment window: once started they can't be cancelled until done
+  (e.g. the skid must finish before driving straight again). Same mechanism as the M4
+  reaction lock.
+- Hard braking (beyond 10 mph/s, D from the book's table). *Built.*
+- Later: bootlegger, T-stop, pivot.
+
+**Control checks** (percentages, no dice shown):
+- Control Table as a formula: `p_fail(HS, v) = clamp((v − v0 − k·HS) / W, 0, 1)`, starting
+  values `v0 = 106 mph`, `k = 27 mph per HS point`, `W = 130 mph` (fits the book's table to
+  ~5 points RMS; too harsh only at HS −6 and walking speed). All three in `tuning.ron`.
+- Continuous, every tick, weighted by the drain the maneuver demands this tick (`dD`, not the
+  actual HS change, so checks continue at the −6 floor):
+  `P(loss in tick) = 1 − (1 − p_fail)^dD`. Draining 1 point = one book control roll;
+  independent of tick rate. Straight driving drains nothing, so it carries no risk.
+- Discrete events: one check at `p_fail` after the event's HS drop (D may be 0), or at a forced
+  HS (spinout recovery at −6). Used for hazards (debris D1, curb/obstacle D3, enemy fire D1–3,
+  blowout D2/D6, driver hit D2), collisions, edges.
+
+**Surfaces** (oil, rain, gravel, snow, ice, off-road): multiply maneuver drain by
+`1 + s·w`, where `s` is the surface's D (oil 2, ice 4, …) and `w` = 0.5 with one wheel on the
+surface, 1 with two or more. Discrete hazards on a surface add `s·w` to their D. Plain oil has
+no entry check (other hazards provide those); flaming oil is a D1 event once per slick.
+
+**Loss of control.** Crash tables as in the book: 2d6 + (D − 3) + speed modifier − skill, where
+D is the planned total of the maneuver underway (or the hazard's D). Table 1 (maneuvers):
+trivial / minor / moderate / severe skid, spinout, roll, burn, vault. Table 2 (hazards):
+fishtails, then possibly table 1. Results are scripted kinematic motions (skid along the old
+direction with the heading kept, fishtail swinging the rear 15°/30°, spinout 90° per 0.2 s at
+−20 mph/s, …).
+
+**Planning & preview.**
+- Keypoints are maneuvers; dragging picks bend / drift / skid parameters in closed form (no
+  simulation fits). Each keypoint shows its D and its loss-of-control chance.
+- The timeline shows the chance of losing control within each second.
+- Maybe: shade the drag area by risk, in closed form (the grip-based danger zones are gone).
+- The preview is still the real `step()` (no rolls), now cheap.
+
+**Removed.** Steering actuator, friction circle, understeer/slide physics, stability gauge,
+the g-force turn mode, the danger zones and their simulation sweeps, the swerve (replaced by
+the drift).
+
+**Order of work.**
+1. Kinematic car with instantaneous steering; remove the grip and slide model. *Done.*
+2. Handling status, drain/recovery, Control Table formula, continuous and discrete checks. *Done.*
+3. Bend and drift keypoints with closed-form drag fitting; per-keypoint and per-second risk. *Done.*
+4. Controlled skid with its commitment window. *Done.*
+5. Crash tables and scripted loss-of-control motions. *Done* (before 4: the skid reuses the
+   crash slide).
+6. Surfaces (oil) and a few hazards on the slalom map; replay the slalom playtest.
+
+**Done when**
+- Preview-vs-reality and determinism tests pass; risk numbers in the preview match measured
+  loss-of-control rates over many seeded runs.
+- Dragging a keypoint stays well under a frame.
+
 ### M3 — Roads, terrain & racing line (M)
 
 **Build**

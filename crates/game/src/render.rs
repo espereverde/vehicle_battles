@@ -11,7 +11,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::egui;
 use bevy_egui::input::egui_wants_any_pointer_input;
-use sim::{Car, Pose, SimState, VehicleTuning};
+use sim::{Car, Pose, SimState, SlideKind, VehicleTuning};
 
 use crate::{Sim, TuningRes};
 
@@ -39,33 +39,28 @@ impl Plugin for RenderPlugin {
 
 const TRAIL_LEN: usize = 600;
 
+/// Whether the car was risking a loss of control at a trail point.
 #[derive(Clone, Copy)]
 enum Traction {
-    Grip,
-    Understeer,
-    Slide,
+    Calm,
+    Hard,
 }
 
 impl Traction {
     fn of(car: &Car) -> Self {
-        match car.slide {
-            Some(_) => Self::Slide,
-            None if car.grip_demand > 1.0 => Self::Understeer,
-            None => Self::Grip,
-        }
+        if car.risk > 0.0 { Self::Hard } else { Self::Calm }
     }
 
     fn trail_color(self) -> Color {
         match self {
-            Self::Grip => css::WHITE.with_alpha(0.25),
-            Self::Understeer => css::ORANGE.with_alpha(0.8),
-            Self::Slide => css::RED.with_alpha(0.8),
+            Self::Calm => css::WHITE.with_alpha(0.25),
+            Self::Hard => css::ORANGE.with_alpha(0.8),
         }
         .into()
     }
 }
 
-/// Recent positions per car (index = position in `SimState::cars`) with their traction.
+/// Recent positions per car (index = position in `SimState::cars`) with their risk.
 #[derive(Resource, Default)]
 pub struct Trails(Vec<VecDeque<(Vec2, Traction)>>);
 
@@ -85,25 +80,12 @@ impl Trails {
     }
 }
 
-/// Grip-demand zone color: green < comfort < yellow < limit < orange (understeer);
-/// sliding is red.
-/// Grip zone, from 0 (green, comfortable) to 3 (red, sliding).
-pub fn zone(demand: f32, sliding: bool, vt: &VehicleTuning) -> usize {
-    if sliding {
-        3
-    } else if demand > 1.0 {
-        2
-    } else if demand > vt.comfort_demand {
-        1
-    } else {
-        0
-    }
-}
-
+/// Risk zone colors (`sim::handling::zone`): green no risk, yellow no risk but maneuvering
+/// would carry some, orange risk, red certain loss of control.
 pub const ZONE_COLORS: [Srgba; 4] = [css::LIME, css::YELLOW, css::ORANGE, css::RED];
 
-pub fn zone_color(demand: f32, sliding: bool, vt: &VehicleTuning) -> Color {
-    ZONE_COLORS[zone(demand, sliding, vt)].into()
+pub fn zone_color(zone: usize) -> Color {
+    ZONE_COLORS[zone.min(3)].into()
 }
 
 pub fn to_egui(c: Color) -> egui::Color32 {
@@ -235,10 +217,28 @@ fn draw_trails(mut gizmos: Gizmos, trails: Res<Trails>) {
 fn draw_cars(mut gizmos: Gizmos, sim: Res<Sim>, tuning: Res<TuningRes>) {
     let vt = &tuning.vehicle;
     for car in &sim.state.cars {
-        let body = if car.slide.is_some() { css::TOMATO } else { css::LIME };
+        // Sliding shows in the body color: controlled skid cyan, skid/T-stop/fishtail orange,
+        // spinout/roll red (a roll crossed out), in the air white; burning gets a ring.
+        let body = match car.slide.map(|s| s.kind) {
+            None => css::LIME,
+            Some(SlideKind::Controlled) => css::AQUA,
+            Some(SlideKind::Skid | SlideKind::TStop | SlideKind::Fishtail) => css::ORANGE,
+            Some(SlideKind::Spinout | SlideKind::Roll) => css::RED,
+            Some(SlideKind::Airborne) => css::WHITE,
+        };
         car_outline(&mut gizmos, car.pose, vt, body);
+        if let Some(s) = car.slide {
+            if s.kind == SlideKind::Roll {
+                let (f, l) = (car.pose.forward() * vt.length * 0.5, car.pose.left() * vt.width * 0.5);
+                gizmos.line_2d(car.pose.pos - f - l, car.pose.pos + f + l, css::RED);
+                gizmos.line_2d(car.pose.pos - f + l, car.pose.pos + f - l, css::RED);
+            }
+            if s.burning {
+                gizmos.circle_2d(Isometry2d::from_translation(car.pose.pos), vt.length * 0.7, css::ORANGE_RED);
+            }
+        }
 
-        // Front wheels at their actual steer angle.
+        // Front wheels at their steer angle.
         let fwd = car.pose.forward();
         let left = car.pose.left();
         let front_axle = car.pose.pos + fwd * vt.wheelbase * 0.5;
@@ -248,38 +248,22 @@ fn draw_cars(mut gizmos: Gizmos, sim: Res<Sim>, tuning: Res<TuningRes>) {
             gizmos.line_2d(c - wheel, c + wheel, css::WHITE);
         }
 
-        // Velocity (where the car is going) vs. heading (where it points).
         gizmos.arrow_2d(car.pose.pos, car.pose.pos + car.vel * 0.5, css::SKY_BLUE);
-        draw_grip_circle(&mut gizmos, car, vt);
-        draw_stability(&mut gizmos, car, &tuning);
+        draw_handling(&mut gizmos, car, &tuning);
     }
 }
 
-/// Stability gauge under the car: a bar that shrinks as stability drains, green above the
-/// yellow zone, yellow in it, red when empty; the tick marks the yellow-zone threshold.
-fn draw_stability(gizmos: &mut Gizmos, car: &Car, tuning: &sim::Tuning) {
+/// Handling status under the car: a bar from the floor (−6) to the handling class, in the
+/// car's risk zone color; the tick marks 0.
+fn draw_handling(gizmos: &mut Gizmos, car: &Car, tuning: &sim::Tuning) {
     const W: f32 = 4.0;
-    let st = &tuning.stability;
+    let (lo, hi) = (tuning.handling.min_status, sim::handling::class(tuning));
+    let frac = |hs: f32| ((hs - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0);
+    let hs = sim::handling::status(car, tuning);
     let left = car.pose.pos - Vec2::new(W * 0.5, tuning.vehicle.length + 0.5);
-    let color = match car.stability {
-        s if s >= st.yellow => css::LIME,
-        s if s > 0.0 => css::YELLOW,
-        _ => css::RED,
-    };
+    let color = zone_color(sim::CarFrame::of(car).zone(tuning));
     gizmos.line_2d(left, left + Vec2::X * W, css::DIM_GRAY);
-    gizmos.line_2d(left, left + Vec2::X * (W * car.stability).max(0.05), color);
-    let mark = left + Vec2::X * W * st.yellow;
+    gizmos.line_2d(left, left + Vec2::X * (W * frac(hs)).max(0.05), color);
+    let mark = left + Vec2::X * W * frac(0.0);
     gizmos.line_2d(mark - Vec2::Y * 0.3, mark + Vec2::Y * 0.3, css::GRAY);
-}
-
-/// Friction circle next to the car: the dot is the delivered acceleration, the ring is the
-/// grip limit (inner ring = sliding limit).
-fn draw_grip_circle(gizmos: &mut Gizmos, car: &Car, vt: &VehicleTuning) {
-    const R: f32 = 2.0;
-    let center = car.pose.pos + Vec2::new(0.0, vt.length + R);
-    let limit = vt.grip * vt.gravity;
-    gizmos.circle_2d(Isometry2d::from_translation(center), R, css::GRAY);
-    gizmos.circle_2d(Isometry2d::from_translation(center), R * vt.slide_grip / vt.grip, css::DIM_GRAY);
-    let dot = zone_color(car.grip_demand, false, vt);
-    gizmos.circle_2d(Isometry2d::from_translation(center + car.accel / limit * R), 0.25, dot);
 }

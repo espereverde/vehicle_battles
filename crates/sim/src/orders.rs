@@ -1,191 +1,100 @@
 //! Orders are intentions, not wheel positions: a queue of segments, each holding a constant
-//! turn (steering or lateral g) and a constant throttle for a fixed number of ticks. Where
+//! turn (steering or drift) and a constant throttle for a fixed number of ticks. Where
 //! a segment ends is whatever the simulation makes of it, so editing one segment moves all
 //! later keypoints while keeping their controls.
 
 use serde::{Deserialize, Serialize};
 
+use crate::drift;
 use crate::state::Controls;
 use crate::tuning::VehicleTuning;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TurnMode {
-    /// Constant steering wheel position.
+    /// Constant steering wheel position: a constant turn radius at any speed.
     Steer,
-    /// Constant lateral acceleration: steering adapts to speed.
-    Lateral,
-    /// Two chained curves of equal and opposite turn rate and equal duration (an S-curve
-    /// that ends pointing the way it started): steering adapts to speed so the yaw rate stays
-    /// constant, and flips sign halfway through the segment.
-    Swerve,
+    /// Car Wars drift: move sideways while ending pointing the way the car started (see
+    /// `drift.rs`).
+    Drift,
+    /// Car Wars controlled skid: the nose swings round quickly while the car keeps sliding
+    /// the way it was going, then it drives on along its new nose.
+    Skid,
 }
+
+/// Slide of a new controlled skid, in inches.
+pub const DEFAULT_SKID: f32 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub enum Turn {
     /// Fraction of full lock, -1 (right) ..= 1 (left).
     Steer(f32),
-    /// Lateral acceleration in g, positive = left.
-    Lateral(f32),
-    /// Yaw rate (rad/s, positive = left) for the first half of the segment, then the
-    /// opposite, with the wheels turning in and out at the steering rate (see
-    /// `Turn::steer_at`). After the segment (as the queue's tail) it drives straight.
-    Swerve(f32),
+    /// Sideways movement per forward movement over the segment (positive = left), at most
+    /// `drift::MAX_RATIO`: an S-curve of two arcs of equal length. After the segment (as the
+    /// queue's tail) it drives straight.
+    Drift(f32),
+    /// From the segment's start the car slides `slide` inches (¼ ..= 1) along its heading
+    /// there while the nose swings by `angle` (radians, + = left, at most
+    /// `max_skid_deg`) over the first `skid_turn_inches`; then it drives straight along the
+    /// new nose. Costs the bend (`angle / bend_deg`) plus `skid_cost_per_inch` per inch slid,
+    /// checked when it starts (`control.rs`). Once started it can't be changed (planning locks
+    /// it). As the queue's tail it drives straight.
+    Skid { angle: f32, slide: f32 },
 }
 
 impl Turn {
     pub fn new(mode: TurnMode, value: f32) -> Self {
         match mode {
             TurnMode::Steer => Turn::Steer(value),
-            TurnMode::Lateral => Turn::Lateral(value),
-            TurnMode::Swerve => Turn::Swerve(value),
+            TurnMode::Drift => Turn::Drift(value),
+            TurnMode::Skid => Turn::Skid { angle: value, slide: DEFAULT_SKID },
         }
     }
 
     pub fn mode(&self) -> TurnMode {
         match self {
             Turn::Steer(_) => TurnMode::Steer,
-            Turn::Lateral(_) => TurnMode::Lateral,
-            Turn::Swerve(_) => TurnMode::Swerve,
+            Turn::Drift(_) => TurnMode::Drift,
+            Turn::Skid { .. } => TurnMode::Skid,
         }
     }
 
     pub fn value(&self) -> f32 {
         match *self {
-            Turn::Steer(v) | Turn::Lateral(v) | Turn::Swerve(v) => v,
+            Turn::Steer(v) | Turn::Drift(v) | Turn::Skid { angle: v, .. } => v,
         }
     }
 
-    /// Steering command at forward speed `v`; `phase` is where the car is in its segment,
-    /// `None` once the segment is over and the turn is the queue's tail. `dt` is the tick
-    /// length.
-    ///
-    /// A swerve's wheels turn in at `steer_rate_deg` and, from where they must start
-    /// swinging across (a ramp centered on the midpoint), are steered back so that the car
-    /// ends pointing the way it started with the wheels straight on the last tick, however
-    /// short and sharp the swerve and wherever the wheels were when it began.
-    pub fn steer_at(&self, v: f32, vt: &VehicleTuning, phase: Option<Phase>, dt: f32) -> f32 {
-        let Turn::Swerve(_) = *self else { return self.steer(v, vt) };
-        let Some(p) = phase else { return 0.0 };
-        let max = vt.max_steer_deg.to_radians();
-        let slew = vt.steer_rate_deg.to_radians();
-        let full = self.steer(v, vt) * max;
-        // Ticks the wheels take to turn from straight to the full angle; the first curve
-        // turns in until the swing across has to start.
-        let ramp = (full.abs() / (slew * dt)).max(1e-6);
-        let (t, mid) = ((p.elapsed + 1) as f32, 0.5 * p.ticks as f32);
-        if t < mid - ramp.min(0.5 * mid) {
-            return full * (t / ramp).min(1.0) / max;
-        }
-        let left = p.ticks.saturating_sub(p.elapsed);
-        let level = swerve_return(v, vt, dt, p.turned, p.wheels, left);
-        // Never so far that the wheels can't be straight again on the last tick.
-        let reach = slew * dt * left.saturating_sub(1) as f32;
-        level.clamp(-reach, reach) / max
-    }
-
-    /// Steering command at forward speed `v` (a swerve: its first curve at full angle).
-    pub fn steer(&self, v: f32, vt: &VehicleTuning) -> f32 {
-        let max = vt.max_steer_deg.to_radians();
+    /// Constant steering command (a drift has none, a skid drives straight: 0).
+    pub fn steer(&self) -> f32 {
         match *self {
             Turn::Steer(s) => s.clamp(-1.0, 1.0),
-            Turn::Lateral(g) => {
-                // Kinematic bicycle: a_lat = v² · tan δ / L.
-                let delta = (g * vt.gravity * vt.wheelbase / (v * v).max(1e-3)).atan().clamp(-max, max);
-                delta / max
-            }
-            Turn::Swerve(rate) => {
-                // Kinematic bicycle: yaw rate = v · tan δ / L.
-                let delta = (rate * vt.wheelbase / v.max(1e-3)).atan().clamp(-max, max);
-                delta / max
-            }
+            Turn::Drift(_) | Turn::Skid { .. } => 0.0,
         }
     }
 
-    /// The same turn expressed in `mode`, steering identically at speed `v` (a swerve:
-    /// its first curve).
-    pub fn convert(&self, mode: TurnMode, v: f32, vt: &VehicleTuning) -> Turn {
-        if self.mode() == mode {
-            return *self;
-        }
-        let delta = self.steer(v, vt) * vt.max_steer_deg.to_radians();
-        match mode {
-            TurnMode::Steer => Turn::Steer(self.steer(v, vt)),
-            TurnMode::Lateral => Turn::Lateral(v * v * delta.tan() / vt.wheelbase / vt.gravity),
-            TurnMode::Swerve => Turn::Swerve(v * delta.tan() / vt.wheelbase),
+    /// The same turn in `mode`, or a straight one when the mode changes.
+    pub fn convert(&self, mode: TurnMode) -> Turn {
+        if self.mode() == mode { *self } else { Turn::new(mode, 0.0) }
+    }
+
+    /// Slide of a controlled skid, in inches (0 for other turns).
+    pub fn slide(&self) -> f32 {
+        match *self {
+            Turn::Skid { slide, .. } => slide.clamp(0.25, 1.0),
+            _ => 0.0,
         }
     }
 }
 
-/// Where a car is in its current segment, for turns that depend on it (`Turn::Swerve`).
+/// Where a car is in its current segment, for turns that depend on it (`Turn::Drift`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Phase {
     /// Ticks of the segment already driven.
     pub elapsed: u32,
     /// Total length of the segment in ticks.
     pub ticks: u32,
-    /// Heading change since the segment started (rad, positive = left).
-    pub turned: f32,
-    /// Current wheel angle (rad).
-    pub wheels: f32,
-}
-
-/// Most solver steps for a swerve's return, and the heading error (rad) it stops at.
-const SOLVER_STEPS: usize = 12;
-const SOLVER_TOLERANCE: f32 = 1e-4;
-
-/// The wheel angle to hold for the rest of a swerve so that, moving the wheels there at
-/// the steering rate, holding, and turning them straight by the end of the `left` ticks,
-/// the car undoes the `turned` heading change. Each tick re-solves it, so speed changes
-/// and tick rounding are corrected as the swerve goes.
-fn swerve_return(v: f32, vt: &VehicleTuning, dt: f32, turned: f32, wheels: f32, left: u32) -> f32 {
-    let max = vt.max_steer_deg.to_radians();
-    let slew = vt.steer_rate_deg.to_radians();
-    let time = left as f32 * dt;
-    // Heading change while the wheels turn from `a` to `b` at the steering rate, per unit
-    // of v / L: ∫ tan δ dt = (-ln cos b + ln cos a) / slew, signed by the direction.
-    let g = |d: f32| -d.cos().ln();
-    let g_wheels = g(wheels);
-    let heading = |h: f32| {
-        let g_h = g(h);
-        let hold = (time - ((h - wheels).abs() + h.abs()) / slew).max(0.0);
-        let sweeps = ((g_h - g_wheels) * (h - wheels).signum() + g_h * h.signum()) / slew;
-        v / vt.wheelbase * (sweeps + h.tan() * hold)
-    };
-    // Levels reachable with time left to straighten the wheels; the heading change grows
-    // with the level, so the root is bracketed (false position, Illinois variant).
-    let (mut lo, mut hi) = (((wheels - slew * time) / 2.0).max(-max), ((wheels + slew * time) / 2.0).min(max));
-    if lo > hi {
-        return 0.0;
-    }
-    let (mut f_lo, mut f_hi) = (turned + heading(lo), turned + heading(hi));
-    if f_lo >= 0.0 {
-        return lo;
-    }
-    if f_hi <= 0.0 {
-        return hi;
-    }
-    let mut side = 0;
-    for _ in 0..SOLVER_STEPS {
-        let h = (lo * f_hi - hi * f_lo) / (f_hi - f_lo);
-        let f = turned + heading(h);
-        if f.abs() < SOLVER_TOLERANCE {
-            return h;
-        }
-        if f < 0.0 {
-            (lo, f_lo) = (h, f);
-            if side == -1 {
-                f_hi *= 0.5;
-            }
-            side = -1;
-        } else {
-            (hi, f_hi) = (h, f);
-            if side == 1 {
-                f_lo *= 0.5;
-            }
-            side = 1;
-        }
-    }
-    (lo * f_hi - hi * f_lo) / (f_hi - f_lo)
+    /// Distance driven in the segment so far (m).
+    pub traveled: f32,
 }
 
 /// Constant controls for a stretch of time.
@@ -204,10 +113,20 @@ impl Drive {
         Drive { turn: Turn::new(mode, 0.0), throttle: hold_throttle(v, vt) }
     }
 
-    /// Controls at forward speed `v`; `phase` and `dt` as in `Turn::steer_at`.
-    pub fn controls(&self, v: f32, vt: &VehicleTuning, phase: Option<Phase>, dt: f32) -> Controls {
+    /// Pedals only (no steering).
+    pub fn pedals(&self) -> Controls {
         let t = self.throttle.clamp(-1.0, 1.0);
-        Controls { steer: self.turn.steer_at(v, vt, phase, dt), throttle: t.max(0.0), brake: (-t).max(0.0), handbrake: false }
+        Controls { steer: 0.0, throttle: t.max(0.0), brake: (-t).max(0.0), handbrake: false }
+    }
+
+    /// Controls at forward speed `v`; `phase` is where the car is in this drive's segment,
+    /// `None` once the segment is over and the drive is the queue's tail; `dt` the tick length.
+    pub fn controls(&self, v: f32, vt: &VehicleTuning, phase: Option<Phase>, dt: f32) -> Controls {
+        let steer = match (self.turn, phase) {
+            (Turn::Drift(ratio), Some(p)) => drift::steer(ratio, self, v, p, vt, dt),
+            _ => self.turn.steer(),
+        };
+        Controls { steer, ..self.pedals() }
     }
 }
 
@@ -228,14 +147,20 @@ pub struct Segment {
     pub ticks: u32,
     /// Ticks already driven (runtime state, advanced by the controller).
     pub elapsed: u32,
+    /// Distance driven so far (m; runtime state, advanced by the controller).
+    #[serde(default)]
+    pub traveled: f32,
     /// Heading when the segment started (runtime state, set by the controller).
     #[serde(default)]
     pub start_heading: Option<f32>,
+    /// A controlled skid's slide has started (runtime state).
+    #[serde(default)]
+    pub skidding: bool,
 }
 
 impl Segment {
     pub fn new(drive: Drive, ticks: u32) -> Self {
-        Self { drive, ticks: ticks.max(1), elapsed: 0, start_heading: None }
+        Self { drive, ticks: ticks.max(1), elapsed: 0, traveled: 0.0, start_heading: None, skidding: false }
     }
 
     pub fn remaining(&self) -> u32 {

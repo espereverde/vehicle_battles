@@ -1,6 +1,6 @@
 //! "Slalom" (M2 playtest): weave through alternating gates and cross the finish line within
-//! a time limit tight enough that comfortable driving fails, so the player has to push into
-//! the yellow stability zone. Layout and limit come from `assets/maps/slalom.ron`.
+//! a time limit tight enough that safe driving fails, so the player has to risk losing
+//! control. Layout and limit come from `assets/maps/slalom.ron`.
 
 use std::path::PathBuf;
 

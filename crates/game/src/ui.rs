@@ -71,8 +71,6 @@ fn inspector(
             };
             let speed = car.vel.length();
             row("speed", format!("{:6.1} km/h", kmh(speed)));
-            row("v long / lat", format!("{:6.1} / {:6.1} km/h", kmh(car.forward_speed()), kmh(car.lateral_speed())));
-            row("slip angle", format!("{:6.1}°", car.slip_angle().to_degrees()));
             row("yaw rate", format!("{:6.1}°/s", car.yaw_rate.to_degrees()));
             row("steer angle", format!("{:6.1}°", car.steer_angle.to_degrees()));
             let a = car.accel;
@@ -82,14 +80,6 @@ fn inspector(
             row("accel total", format!("{:6.1} km/h/s ({:.2} g)", kmh(a.length()), a.length() / tuning.vehicle.gravity));
             row("heading", format!("{:6.1}°", car.pose.heading.to_degrees()));
             row("position", format!("{:7.1}, {:7.1}", car.pose.pos.x, car.pose.pos.y));
-            row(
-                "traction",
-                match car.slide {
-                    Some(s) => format!("SLIDING {:.2} s", s.time),
-                    None if car.grip_demand > 1.0 => "understeer".into(),
-                    None => "—".into(),
-                },
-            );
             let c = car.controls;
             row(
                 "controls",
@@ -100,31 +90,36 @@ fn inspector(
                 None => "continue".into(),
             };
             row("orders", format!("{orders}  {}", crate::planning::describe(&car.orders.active_drive())));
+            if let Some(s) = car.slide {
+                let left = if s.distance.is_finite() { format!("{:.1} m left", s.distance) } else { "until stopped".into() };
+                row("slide", format!("{:?}{} — {left}", s.kind, if s.burning { " (BURNING)" } else { "" }));
+            }
         });
-        ui.add(
-            egui::ProgressBar::new((car.grip_demand / 1.5).min(1.0))
-                .text(format!("grip demand {:.0}%", car.grip_demand * 100.0))
-                .fill(crate::render::to_egui(crate::render::zone_color(car.grip_demand, car.slide.is_some(), &tuning.vehicle)).gamma_multiply(0.7)),
-        );
-        let st = &tuning.stability;
-        let (zone, color) = match car.stability {
-            s if s >= st.yellow => ("calm", egui::Color32::from_rgb(60, 160, 60)),
-            s if s > 0.0 => ("risky: rolls for loss of control", egui::Color32::from_rgb(190, 160, 0)),
-            _ => ("LOSS OF CONTROL", egui::Color32::from_rgb(190, 50, 50)),
+        let hs = sim::handling::status(car, &tuning);
+        let (lo, hi) = (tuning.handling.min_status, sim::handling::class(&tuning));
+        let zone = sim::CarFrame::of(car).zone(&tuning);
+        let note = match zone {
+            0 => "safe".to_string(),
+            1 => format!("maneuvering is risky: {:.0}% per point", sim::handling::p_fail(hs, car.vel.length(), &tuning) * 100.0),
+            _ if car.slide.is_some() => "sliding".to_string(),
+            _ => format!("{:.1}% this tick", car.risk * 100.0),
         };
-        ui.add(egui::ProgressBar::new(car.stability).text(format!("stability {:.0}% — {zone}", car.stability * 100.0)).fill(color));
+        ui.add(
+            egui::ProgressBar::new(((hs - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0))
+                .text(format!("handling {hs:+.1} / {hi:+.0} — {note}"))
+                .fill(crate::render::to_egui(crate::render::zone_color(zone)).gamma_multiply(0.7)),
+        );
 
         ui.separator();
         egui::CollapsingHeader::new("Events").default_open(false).show(ui, |ui| {
             for e in log.0.iter().rev() {
                 ui.monospace(match e {
-                    SimEvent::SlideStarted { tick, speed, .. } => format!("{tick:>6}  slide start @ {:.0} km/h", kmh(*speed)),
-                    SimEvent::SlideEnded { tick, duration, .. } => format!("{tick:>6}  slide end after {duration:.2} s"),
                     SimEvent::SegmentCompleted { tick, remaining, .. } => format!("{tick:>6}  segment done, {remaining} left"),
                     SimEvent::Risk { tick, chance, .. } => format!("{tick:>6}  risk check {:.0}%", chance * 100.0),
                     SimEvent::LossOfControl { tick, kind, speed, .. } => {
                         format!("{tick:>6}  LOST CONTROL: {kind:?} @ {:.0} km/h", kmh(*speed))
                     }
+                    SimEvent::SlideEnded { tick, .. } => format!("{tick:>6}  slide ended"),
                 });
             }
         });
@@ -133,8 +128,8 @@ fn inspector(
             ui.label("LMB ground  add keypoint (drag to place)");
             ui.label("LMB ghost   drag: further = later, sideways = turn");
             ui.label("Wheel       throttle ±5% (dragged/hovered/selected)");
-            ui.label("T turn mode: steering / g-force / swerve");
-            ui.label("S straight at current speed · Z danger zones · X drift fans");
+            ui.label("T turn mode: steering / drift / skid");
+            ui.label("S straight at current speed");
             ui.label("RMB ghost / Del  delete · Esc revert");
             ui.label(".           single tick");
             ui.label("Ctrl+Wheel / MMB zoom / pan · F follow car");

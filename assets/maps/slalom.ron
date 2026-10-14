@@ -2,11 +2,13 @@
 // within the time limit. The car starts at the origin heading +x, at rest.
 // Gates alternate sides, so the car must weave; a missed gate costs `miss_penalty` seconds.
 //
-// Calibration (scripted driver, default tuning): comfortable driving (grip demand <= 0.7)
-// finishes in ~21.7 s, hard driving with stability still green in ~18.8 s; faster than that
-// the gauge drops into yellow and the car starts losing control.
+// Calibration (scripted driver on the smooth line through the gates, default tuning, HC 3):
+// 14 m/s finishes in 18.7 s without risk (handling down to -1.5); 15 m/s in 17.4 s with a
+// 60% chance of losing control; 16 m/s in 16.2 s loses control for sure. Each gate swings
+// the heading ~85° (5-6 handling points), so the drain rate is about speed / 4 points/s
+// against HC points/s of recovery.
 (
-    time_limit: 20.5,     // s, including penalties
+    time_limit: 18.0,     // s, including penalties
     miss_penalty: 2.0,    // s per missed gate
     gate_width: 4.0,      // m between the two cones of a gate
     // Gate centers (x, y). Cones sit at y ± gate_width / 2.

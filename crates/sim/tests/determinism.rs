@@ -1,7 +1,7 @@
 use sim::{Controls, DriveMode, Pose, SimEvent, SimRng, SimState, StepMode, Tuning, Vec2, World};
 
 /// A scripted but erratic driver: holds random controls for random durations, including
-/// full-lock steering and handbrake turns, so the run exercises grip and slide paths.
+/// full-lock steering and handbrake, so the run exercises risk checks and losses of control.
 struct ScriptedDriver {
     rng: SimRng,
     current: Controls,
@@ -80,8 +80,8 @@ fn cloned_state_steps_bitwise_identically() {
     assert_eq!(a.tick, 1120);
 
     // Make sure the test actually exercised the interesting code paths.
-    assert!(ea.iter().any(|e| matches!(e, SimEvent::SlideStarted { .. })), "no slides happened");
-    assert!(ea.iter().any(|e| matches!(e, SimEvent::SlideEnded { .. })), "no slide recovered");
+    assert!(ea.iter().any(|e| matches!(e, SimEvent::Risk { .. })), "no risk checks happened");
+    assert!(ea.iter().any(|e| matches!(e, SimEvent::LossOfControl { .. })), "never lost control");
 }
 
 #[test]

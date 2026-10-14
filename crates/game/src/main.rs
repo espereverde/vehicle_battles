@@ -12,7 +12,6 @@ mod timeline;
 mod track;
 mod tuning_file;
 mod ui;
-mod zones;
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -61,7 +60,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
-                title: "Vehicle Battles — M2 (stability)".into(),
+                title: "Vehicle Battles — M2 (handling)".into(),
                 ..default()
             }),
             ..default()
@@ -83,7 +82,6 @@ fn main() {
             manual::ManualPlugin,
             replay::ReplayPlugin,
             ui::UiPlugin,
-            zones::ZonesPlugin,
             slalom::SlalomPlugin,
         ))
         .add_systems(Update, (hotkeys.run_if(not(egui_wants_any_keyboard_input)), tuning_file::hot_reload))
@@ -124,7 +122,7 @@ fn hotkeys(
         stepper.command(Command::SetDriveMode { car: player, mode });
         // Back to orders: drive straight on at the current speed.
         let car = stepper.sim.player_car();
-        let tail = Drive::straight_at(draft.mode, car.forward_speed().max(0.0), &stepper.tuning.vehicle);
+        let tail = Drive::straight_at(draft.mode, car.speed().max(0.0), &stepper.tuning.vehicle);
         stepper.command(Command::SetOrders { car: player, orders: OrderQueue { segments: Vec::new(), tail } });
         stepper.check.stop();
         draft.reset(&stepper.sim.player_car().orders);

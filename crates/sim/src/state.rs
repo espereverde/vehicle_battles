@@ -1,6 +1,8 @@
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 
+use crate::crash::Slide;
+use crate::ease::{Slip, slip_angle};
 use crate::orders::OrderQueue;
 use crate::rng::SimRng;
 
@@ -54,47 +56,49 @@ pub enum DriveMode {
 pub struct Pilot {
     /// Seconds of locked orders after a pause (M4).
     pub reaction_time: f32,
-    /// 0 ..= 1, scales stability recovery (M2).
+    /// Driver skill bonus (Car Wars "Driver +n"): adds to handling recovery per second.
     pub skill: f32,
 }
 
 impl Default for Pilot {
     fn default() -> Self {
-        Self { reaction_time: 0.6, skill: 0.5 }
+        Self { reaction_time: 0.6, skill: 0.0 }
     }
-}
-
-/// Present while the tires are past the grip limit.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
-pub struct SlideState {
-    /// Seconds since the slide started.
-    pub time: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Car {
     pub id: CarId,
     pub pose: Pose,
-    /// World-space velocity, m/s. Not necessarily aligned with the heading while sliding.
+    /// World-space velocity, m/s (along the direction of travel: `travel_dir`).
     pub vel: Vec2,
     /// rad/s.
     pub yaw_rate: f32,
-    /// Actual front wheel angle in radians (rate-limited towards `controls.steer`).
+    /// Front wheel angle in radians (`controls.steer` times the steering lock).
     pub steer_angle: f32,
-    pub slide: Option<SlideState>,
-    /// 1 = calm, 0 = certain loss of control (`stability.rs`).
-    pub stability: f32,
-    /// Seconds at risk since the last risk check.
+    /// Handling points below the handling class: handling status = class − this
+    /// (`handling.rs`).
     #[serde(default)]
-    pub risk_timer: f32,
+    pub handling_lost: f32,
+    /// Present while sliding: a crash result or a controlled skid (`crash.rs`).
+    #[serde(default)]
+    pub slide: Option<Slide>,
+    /// Present while the direction of travel eases towards the slide's (while sliding) or
+    /// the nose (after a slide) instead of jumping there.
+    #[serde(default)]
+    pub slip: Option<Slip>,
     pub controls: Controls,
     pub drive_mode: DriveMode,
     pub orders: OrderQueue,
     pub pilot: Pilot,
-    /// Telemetry from the last tick: acceleration the tires actually delivered (world space).
+    /// Telemetry from the last tick: acceleration (world space).
     pub accel: Vec2,
-    /// Telemetry from the last tick: intended acceleration / available grip (1.0 = limit).
-    pub grip_demand: f32,
+    /// Telemetry from the last tick: handling points drained.
+    #[serde(default)]
+    pub drain: f32,
+    /// Telemetry from the last tick: chance of losing control.
+    #[serde(default)]
+    pub risk: f32,
 }
 
 impl Car {
@@ -105,15 +109,16 @@ impl Car {
             vel: Vec2::ZERO,
             yaw_rate: 0.0,
             steer_angle: 0.0,
+            handling_lost: 0.0,
             slide: None,
-            stability: 1.0,
-            risk_timer: 0.0,
+            slip: None,
             controls: Controls::default(),
             drive_mode: DriveMode::default(),
             orders: OrderQueue::default(),
             pilot: Pilot::default(),
             accel: Vec2::ZERO,
-            grip_demand: 0.0,
+            drain: 0.0,
+            risk: 0.0,
         }
     }
 
@@ -122,18 +127,16 @@ impl Car {
         self.vel.dot(self.pose.forward())
     }
 
-    /// Signed sideways speed (positive = moving to the car's left).
-    pub fn lateral_speed(&self) -> f32 {
-        self.vel.dot(self.pose.left())
+    /// Where the car should be going: along the slide while sliding, the nose otherwise;
+    /// turned by any slip left.
+    pub fn travel_dir(&self) -> Vec2 {
+        let target = self.slide.map_or(self.pose.forward(), |s| s.dir);
+        Vec2::from_angle(slip_angle(self.slip)).rotate(target)
     }
 
-    /// Angle between heading and velocity, radians. Zero when (nearly) stopped.
-    pub fn slip_angle(&self) -> f32 {
-        if self.vel.length_squared() < 0.25 {
-            0.0
-        } else {
-            self.lateral_speed().atan2(self.forward_speed())
-        }
+    /// Signed speed along the direction of travel (along the heading when not slipping).
+    pub fn speed(&self) -> f32 {
+        self.vel.dot(self.travel_dir())
     }
 }
 

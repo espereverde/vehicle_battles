@@ -8,7 +8,6 @@ use bevy_egui::{EguiContexts, EguiPrimaryContextPass, egui};
 use sim::{Turn, TurnMode};
 
 use crate::challenge::Challenge;
-use crate::zones::DangerZones;
 use crate::planning::{Draft, PlanPreview};
 use crate::render::{to_egui, zone_color};
 use crate::{AppState, Sim, TuningRes};
@@ -37,7 +36,6 @@ fn timeline(
     mut draft: ResMut<Draft>,
     mut plan: ResMut<PlanPreview>,
     mut next: ResMut<NextState<AppState>>,
-    mut zones: ResMut<DangerZones>,
 ) -> Result {
     let ctx = contexts.ctx_mut()?;
     // Reborrow so disjoint fields can be borrowed separately.
@@ -58,14 +56,10 @@ fn timeline(
                 if ui.add_enabled(!draft.orders.segments.is_empty(), egui::Button::new("Clear")).clicked() {
                     draft.clear();
                 }
-                ui.checkbox(&mut zones.enabled, "Danger zones (Z)")
-                    .on_hover_text("Shade where the selected (or next) keypoint can go, in the grip color its path would get");
-                ui.checkbox(&mut zones.drift, "Drift (X)")
-                    .on_hover_text("Where the path is orange/red: how far out the real car could run wide or slide");
                 ui.separator();
                 ui.label("Turn (T):");
                 let shown = draft.shown_mode();
-                for (mode, label) in [(TurnMode::Steer, "Steering"), (TurnMode::Lateral, "G-force"), (TurnMode::Swerve, "Swerve")] {
+                for (mode, label) in [(TurnMode::Steer, "Steering"), (TurnMode::Drift, "Drift"), (TurnMode::Skid, "Skid")] {
                     if ui.selectable_label(shown == mode, label).clicked() && shown != mode {
                         let keypoint = draft.selected.and_then(|k| plan.keypoint(k)).map(|f| f.pose.pos);
                         draft.set_mode(mode, &sim, &tuning, keypoint);
@@ -86,9 +80,9 @@ fn timeline(
             let x = |i: usize| rect.left() + rect.width() * i.min(n) as f32 / n as f32;
             let tick_at = |px: f32| (((px - rect.left()) / rect.width()) * n as f32).round().clamp(0.0, n as f32) as usize;
 
-            // Grip-demand strip, one run of equal color at a time.
+            // Risk-zone strip, one run of equal color at a time.
             let frame = |i: usize| preview.frame(sim.player, i);
-            let color = |i: usize| frame(i).map_or(egui::Color32::BLACK, |f| to_egui(zone_color(f.grip_demand, f.at_risk(&tuning), &tuning.vehicle)));
+            let color = |i: usize| frame(i).map_or(egui::Color32::BLACK, |f| to_egui(zone_color(f.zone(&tuning))));
             let strip_y = rect.top() + 2.0..=rect.top() + 2.0 + STRIP;
             let mut run_start = 0;
             for i in 1..=n {
@@ -126,24 +120,27 @@ fn timeline(
                 }
             }
 
-            // Stability graph: the gauge over time, the yellow-zone line, and risk stretches as
-            // red bands labelled with their chance.
+            // Handling graph: status over time (floor to handling class, line at 0), and for
+            // each second the chance of losing control in it, as a red band and label.
             let stab_top = rect.top() + 6.0 + STRIP + SPANS;
-            let stab_y = |s: f32| stab_top + STAB * (1.0 - s.clamp(0.0, 1.0));
-            let st = &tuning.stability;
-            let yellow = stab_y(st.yellow);
-            painter.line_segment([egui::pos2(rect.left(), yellow), egui::pos2(rect.right(), yellow)], (1.0, egui::Color32::from_rgba_unmultiplied(255, 220, 0, 60)));
+            let (lo, hi) = (tuning.handling.min_status, sim::handling::class(&tuning));
+            let stab_y = |hs: f32| stab_top + STAB * (1.0 - ((hs - lo) / (hi - lo).max(1e-3)).clamp(0.0, 1.0));
+            let zero = stab_y(0.0);
+            painter.line_segment([egui::pos2(rect.left(), zero), egui::pos2(rect.right(), zero)], (1.0, egui::Color32::from_white_alpha(40)));
             let red = egui::Color32::from_rgb(255, 70, 70);
-            for r in &plan.risks {
-                let band = egui::Rect::from_x_y_ranges(x(r.start) - 1.0..=x(r.end) + 1.0, stab_top..=stab_top + STAB);
-                painter.rect_filled(band, 0.0, red.gamma_multiply(if r.certain_at.is_some() { 0.45 } else { 0.1 + 0.4 * r.chance }));
-                let label = if r.certain_at.is_some() { "LOSS".to_string() } else { format!("{:.0}%", r.chance * 100.0) };
-                painter.text(egui::pos2(x(r.at()) + 2.0, stab_top + 1.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(10.0), egui::Color32::WHITE);
+            for (sec, &p) in preview.risk_per_second(sim.player, &tuning).iter().enumerate() {
+                if p <= 0.0 {
+                    continue;
+                }
+                let (a, b) = (x((sec as f32 * rate) as usize), x(((sec + 1) as f32 * rate) as usize));
+                painter.rect_filled(egui::Rect::from_x_y_ranges(a + 1.0..=b - 1.0, stab_top..=stab_top + STAB), 0.0, red.gamma_multiply(0.1 + 0.4 * p));
+                let label = if p >= 0.995 { "LOSS".to_string() } else { format!("{:.0}%", (p * 100.0).max(1.0)) };
+                painter.text(egui::pos2(a + 3.0, stab_top + 1.0), egui::Align2::LEFT_TOP, label, egui::FontId::proportional(10.0), egui::Color32::WHITE);
             }
             for i in 1..=n {
                 let (Some(a), Some(b)) = (frame(i - 1), frame(i)) else { break };
-                let c = if b.stability >= st.yellow { egui::Color32::LIGHT_GREEN } else { egui::Color32::YELLOW };
-                painter.line_segment([egui::pos2(x(i - 1), stab_y(a.stability)), egui::pos2(x(i), stab_y(b.stability))], (1.5, c));
+                let c = to_egui(zone_color(b.zone(&tuning)));
+                painter.line_segment([egui::pos2(x(i - 1), stab_y(a.status(&tuning))), egui::pos2(x(i), stab_y(b.status(&tuning)))], (1.5, c));
             }
 
             // Seconds and target hits.
@@ -184,20 +181,13 @@ fn timeline(
             painter.line_segment([egui::pos2(px, rect.top()), egui::pos2(px, rect.bottom())], (2.0, egui::Color32::YELLOW));
 
             if let Some(f) = frame(plan.scrub) {
-                let traction = if f.at_risk(&tuning) {
-                    "may LOSE CONTROL (not simulated)"
-                } else if f.grip_demand > 1.0 {
-                    "would understeer (not simulated)"
-                } else {
-                    ""
-                };
+                let risk = if f.risk > 0.0 { format!("risk {:.1}%/tick", f.risk * 100.0) } else { String::new() };
                 ui.monospace(format!(
-                    "t = {:4.2} s   speed {:5.1} km/h   accel {:+6.1} km/h/s   grip {:3.0}%   stability {:3.0}%  {traction}",
+                    "t = {:4.2} s   speed {:5.1} km/h   accel {:+6.1} km/h/s   handling {:+4.1}   {risk}",
                     plan.scrub as f32 / rate,
                     crate::ui::kmh(f.vel.length()),
                     crate::ui::kmh(f.accel.dot(f.vel.normalize_or_zero())),
-                    f.grip_demand * 100.0,
-                    f.stability * 100.0
+                    f.status(&tuning),
                 ));
                 for r in &plan.risks {
                     ui.colored_label(red, PlanPreview::risk_label(r, rate));
@@ -211,23 +201,31 @@ fn timeline(
             if challenge.done() {
                 ui.small("Course complete — R to retry, N for a new course.");
             }
-            keypoint_editor(ui, draft, &tuning);
+            keypoint_editor(ui, draft, plan, &tuning);
         });
 
     Ok(())
 }
 
 /// Exact values for the selected keypoint's segment.
-fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, tuning: &sim::Tuning) {
+fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, plan: &PlanPreview, tuning: &sim::Tuning) {
     let Some(k) = draft.selected.filter(|&k| k < draft.orders.segments.len()) else { return };
     let rate = tuning.tick_rate as f32;
     let (mut changed, mut delete) = (false, false);
     let max_secs = draft.max_ticks(k, tuning) as f32 / rate;
     let mut new_ticks = None;
+    let locked = draft.locked(k);
     ui.separator();
     ui.horizontal(|ui| {
         let seg = &mut draft.orders.segments[k];
         ui.strong(format!("Keypoint #{}", k + 1));
+        if let Some((drained, chance)) = plan.keypoint_risk(k) {
+            ui.label(crate::planning::risk_text(drained, chance));
+        }
+        if locked {
+            ui.label(format!("{} — committed: a started skid can't be changed", crate::planning::describe(&seg.drive)));
+            return;
+        }
 
         let mut throttle = seg.drive.throttle * 100.0;
         ui.label("throttle");
@@ -245,18 +243,31 @@ fn keypoint_editor(ui: &mut egui::Ui, draft: &mut Draft, tuning: &sim::Tuning) {
                     changed = true;
                 }
             }
-            Turn::Lateral(g) => {
-                ui.label("lateral");
-                let max = tuning.planner.max_lateral_g;
-                changed |= ui.add(egui::DragValue::new(g).speed(0.01).range(-max..=max).fixed_decimals(2).suffix(" g")).changed();
+            Turn::Drift(r) => {
+                let max = sim::drift::MAX_RATIO;
+                ui.label("sideways");
+                changed |= ui
+                    .add(egui::DragValue::new(r).speed(0.005).range(-max..=max).fixed_decimals(3).suffix("\" per inch"))
+                    .on_hover_text("Sideways movement per forward movement (+ left); ¼ is a drift, ½ a steep drift")
+                    .changed();
             }
-            Turn::Swerve(rate) => {
-                let mut deg = rate.to_degrees();
-                ui.label("turn rate");
-                if ui.add(egui::DragValue::new(&mut deg).speed(0.5).range(-180.0..=180.0).fixed_decimals(1).suffix(" °/s")).changed() {
-                    *rate = deg.to_radians();
+            Turn::Skid { angle, slide } => {
+                let max = tuning.crash.max_skid_deg;
+                let mut deg = angle.to_degrees();
+                ui.label("nose");
+                if ui
+                    .add(egui::DragValue::new(&mut deg).speed(0.5).range(-max..=max).fixed_decimals(0).suffix("°"))
+                    .on_hover_text("How far the nose swings round (+ left); costs 1 handling point per 15°")
+                    .changed()
+                {
+                    *angle = deg.to_radians();
                     changed = true;
                 }
+                ui.label("slide");
+                changed |= ui
+                    .add(egui::DragValue::new(slide).speed(0.01).range(0.25..=1.0).fixed_decimals(2).suffix("\""))
+                    .on_hover_text("Book inches of slide: the car keeps going the way it was for ¼ s per ¼\" while the nose swings (+1 handling point per ¼\")")
+                    .changed();
             }
         }
 

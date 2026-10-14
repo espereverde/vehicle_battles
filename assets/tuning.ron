@@ -8,7 +8,6 @@
         width: 1.9,
         wheelbase: 2.7,
         max_steer_deg: 35.0,
-        steer_rate_deg: 120.0,
 
         engine_accel: 8.0,
         top_speed: 42.0,
@@ -18,57 +17,53 @@
         rolling_resistance: 0.3,
         drag: 0.0004,
 
-        // Friction circle radius = grip * gravity.
         gravity: 9.81,
-        grip: 1.5,
-        slide_grip: 0.75,
+        handling_class: 3.0,     // Car Wars HC: max handling status; recovery/s = HC + skill (>= 1)
 
-        // Grip demand zones: green < comfort_demand < yellow < 1.0 < orange (understeer:
-        // runs wide). Slides come from the stability gauge (below) or the handbrake.
-        comfort_demand: 0.7,
-        understeer_scrub: 0.3,   // g of drag per unit of demand over 1.0 (plowing)
-
-        // Slide behavior.
-        slide_steer_authority: 0.35,
-        slide_yaw_tau: 0.5,
-        slide_exit_lat_speed: 1.0,
-        slide_exit_demand: 0.85,
-        slide_exit_yaw_error_deg: 15.0,
-
-        handbrake_decel: 3.0,
-        handbrake_grip: 0.6,
-        handbrake_yaw_gain: 1.8,
-        handbrake_min_speed: 3.0,
+        handbrake_decel: 3.0,    // extra braking
     ),
-    // Stability gauge: 1 = calm, 0 = certain loss of control.
-    stability: (
-        k_drain: 3.0,        // drain/s = k_drain * (demand - comfort)^2 above comfort
-        k_jerk: 0.05,        // drain per unit of grip-demand change (harsh transitions)
-        k_rec: 0.3,          // recovery/s = k_rec * pilot skill, below comfort
-        yellow: 0.6,         // below: risk checks roll for loss of control
-        risk_interval: 0.25, // s between checks (yellow zone, above comfort)
-        risk_max: 0.35,      // chance per check near 0: risk_max * (1 - s/yellow)^2
-        min_speed: 10.0,     // m/s (36 km/h); slower cars never lose control, they just understeer
-        skid_speed: 12.0,    // m/s; below: always a skid
-        spin_speed: 25.0,    // m/s; above: always a spin
-        skid_yaw_kick: 1.0,  // rad/s into the turn
-        spin_yaw_kick: 5.0,
-        after_loss: 0.3,     // stability right after losing control
+    // Handling status and control checks (Car Wars, continuous). Control Table speeds in mph.
+    handling: (
+        min_status: -6.0,
+        safe_speed_mph: 106.0,     // one roll fails with clamp((v - safe - per_status*HS) / range)
+        mph_per_status: 27.0,
+        fail_range_mph: 130.0,
+        bend_deg: 15.0,            // heading change per handling point (D1 bend)
+        drift_cost: 1.0,           // points per inch forward drifting 1/4" sideways per inch (D1)
+        steep_drift_cost: 3.0,     // ... at 1/2" per inch, the steepest (D3)
+        free_braking_mph_s: 10.0,  // harder braking drains: 15 mph/s -> 1/s, 20 -> 2, 25 -> 3, +2 per 5
+    ),
+    // Crash results and controlled skids (Car Wars values).
+    crash: (
+        spin_deg_per_s: 450.0,     // spinout: 90 degrees per phase (0.2 s)
+        decel_mph_s: 20.0,         // spinout and roll deceleration
+        tstop_mph_per_inch: 20.0,  // T-stop deceleration per inch slid
+        recovery_seconds: 1.0,     // between spinout recovery rolls (at handling -6)
+        stop_speed: 0.3,           // m/s; below: a spinout, T-stop or roll has stopped
+        skid_cost_per_inch: 4.0,   // controlled skid: +1 per 1/4" slid
+        skid_seconds_per_inch: 1.0, // ... lasts this long per book inch (1/4" -> 0.25 s), so it shows at any speed
+        skid_turn_seconds: 0.25,   // ... its nose swings round over the slide's first seconds
+        max_skid_deg: 90.0,        // ... by at most this much
+        // Easing: the book says where the car ends up, these say how smoothly it gets there.
+        slide_entry_seconds: 0.15, // a slide's direction of travel swings over from the car's
+        regrip_seconds: 0.35,      // ... and back onto the nose after it
+        spin_up_seconds: 0.4,      // spinout rotation builds up from the car's turn (a T-stop's dies down)
+        spin_fade_speed: 6.0,      // ... and winds down below this speed (m/s)
+        roll_turn_seconds: 0.3,    // a roll turns the car sideways over this long
+        fishtail_seconds: 0.25,    // a fishtail swings the rear round over this long
     ),
     // Planning tool.
     planner: (
         default_throttle: 0.4,      // new keypoint throttle when the car would sit still
         throttle_step: 0.05,        // per mouse-wheel notch
-        max_lateral_g: 3.0,         // tightest planned turn (g), both turn modes
         straight_seconds: 1.0,      // length of a keypoint added with "Straight"
-        drift_recover_seconds: 0.5, // drift fans: how long the outward offset lingers after the plan is back in grip
     ),
     // Debug keyboard driving (M key toggles manual mode).
-    // Full key input asks for a lateral grip demand, not a wheel angle.
+    // Full key input asks for a lateral acceleration, not a wheel angle.
     keyboard: (
         steer_ramp_per_s: 2.0,
         steer_return_per_s: 5.0,
-        full_steer_demand: 0.9,  // A/D: hard cornering, stays in yellow
-        push_steer_demand: 3.0,  // Ctrl+A/D: beyond the limit
+        full_steer_g: 1.35,  // A/D
+        push_steer_g: 4.5,   // Ctrl+A/D
     ),
 )
